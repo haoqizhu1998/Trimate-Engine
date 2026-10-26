@@ -86,13 +86,21 @@ def execute(args) -> dict[str, object]:
         ).ingest(batch)
         return asdict(result)
     if args.command == "sync":
+        if not 1 <= args.chunk_days <= 28:
+            raise ValueError("Garmin China chunk days must be between 1 and 28")
         connector = GarminCnConnector(home=home)
         result = IngestionService(
             athlete_id=runtime.athlete_id,
             store=runtime.store,
             raw_dir=runtime.layout.raw,
-        ).sync(connector, SyncWindow(args.start, args.end))
-        return {"source": "garmin-cn", **asdict(result)}
+        ).sync_chunked(
+            connector,
+            SyncWindow(args.start, args.end),
+            chunk_days=args.chunk_days,
+        )
+        day_count = (args.end - args.start).days + 1
+        chunk_count = (day_count + args.chunk_days - 1) // args.chunk_days
+        return {"source": "garmin-cn", "chunks": chunk_count, **asdict(result)}
     if args.command == "garmin-cn-login":
         email = (args.email or input("Garmin China email: ")).strip()
         if not email:

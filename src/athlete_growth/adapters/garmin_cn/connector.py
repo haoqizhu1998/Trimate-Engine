@@ -41,23 +41,27 @@ class GarminSessionClient(Protocol):
         self, startdate: str, enddate: str
     ) -> list[dict[str, object]]: ...
 
-    def get_user_summary(self, cdate: str) -> dict[str, object]: ...
+    def get_daily_summaries(self, start: str, end: str) -> dict[str, object]: ...
 
-    def get_steps_data(self, cdate: str) -> list[dict[str, object]]: ...
+    def get_daily_steps(self, start: str, end: str) -> list[dict[str, object]]: ...
 
-    def get_sleep_data(self, cdate: str) -> dict[str, object]: ...
+    def get_sleep_daily(self, start: str, end: str) -> list[dict[str, object]]: ...
 
-    def get_hrv_data(self, cdate: str) -> dict[str, object] | None: ...
+    def get_hrv_data_range(self, start: str, end: str) -> dict[str, object] | None: ...
 
-    def get_heart_rates(self, cdate: str) -> dict[str, object]: ...
-
-    def get_stress_data(self, cdate: str) -> dict[str, object]: ...
-
-    def get_body_battery(
-        self, startdate: str, enddate: str
+    def get_daily_heart_rate_stats(
+        self, start: str, end: str
     ) -> list[dict[str, object]]: ...
 
-    def get_weigh_ins(self, startdate: str, enddate: str) -> dict[str, object]: ...
+    def get_daily_stress_stats(
+        self, start: str, end: str
+    ) -> list[dict[str, object]]: ...
+
+    def get_daily_body_battery_stats(
+        self, start: str, end: str
+    ) -> list[dict[str, object]]: ...
+
+    def get_weight_snapshot(self, start: str, end: str) -> dict[str, object]: ...
 
 
 GarminClientFactory = Callable[..., GarminSessionClient]
@@ -175,32 +179,40 @@ class GarminCnSessionGateway:
         ):
             rows.append(self._row("activity", activity, start, index))
 
-        current = start
-        while current <= end:
-            current_text = current.isoformat()
-            daily_calls: tuple[tuple[str, Callable[[str], object]], ...] = (
-                ("daily-summary", client.get_user_summary),
-                ("steps", client.get_steps_data),
-                ("sleep", client.get_sleep_data),
-                ("hrv", client.get_hrv_data),
-                ("heart-rate", client.get_heart_rates),
-                ("stress", client.get_stress_data),
-            )
-            for kind, fetch_daily in daily_calls:
-                document = fetch_daily(current_text)
-                rows.extend(self._document_rows(kind, document, current))
-            current = date.fromordinal(current.toordinal() + 1)
-
-        rows.extend(
-            self._document_rows(
-                "body-battery", client.get_body_battery(start_text, end_text), start
-            )
+        range_documents: tuple[tuple[str, object, str | None], ...] = (
+            (
+                "daily-summary",
+                client.get_daily_summaries(start_text, end_text),
+                "data",
+            ),
+            ("steps", client.get_daily_steps(start_text, end_text), None),
+            ("sleep", client.get_sleep_daily(start_text, end_text), None),
+            ("hrv", client.get_hrv_data_range(start_text, end_text), "hrvSummaries"),
+            (
+                "heart-rate",
+                client.get_daily_heart_rate_stats(start_text, end_text),
+                None,
+            ),
+            ("stress", client.get_daily_stress_stats(start_text, end_text), None),
+            (
+                "body-battery",
+                client.get_daily_body_battery_stats(start_text, end_text),
+                None,
+            ),
+            (
+                "body-weight",
+                client.get_weight_snapshot(start_text, end_text),
+                "dateWeightList",
+            ),
         )
-        rows.extend(
-            self._document_rows(
-                "body-weight", client.get_weigh_ins(start_text, end_text), start
+        for kind, document, collection_key in range_documents:
+            rows.extend(
+                self._document_rows(
+                    kind,
+                    self._collection(document, collection_key),
+                    start,
+                )
             )
-        )
         return rows
 
     def healthcheck(self) -> bool:
@@ -235,13 +247,27 @@ class GarminCnSessionGateway:
         return []
 
     @staticmethod
+    def _collection(document: object, key: str | None) -> object:
+        if key is None or not isinstance(document, dict):
+            return document
+        value = document.get(key)
+        return value if isinstance(value, list) else []
+
+    @staticmethod
     def _row(
         kind: str, item: dict[str, object], fallback_date: date, index: int
     ) -> dict[str, object]:
+        identity_keys = (
+            ("activityId",)
+            if kind == "activity"
+            else ("samplePk", "timestampGMT", "version", "calendarDate", "date")
+            if kind == "body-weight"
+            else ("calendarDate", "date", "summaryId", "id")
+        )
         source_id = next(
             (
                 item[key]
-                for key in ("activityId", "calendarDate", "date", "summaryId", "id")
+                for key in identity_keys
                 if item.get(key) is not None
             ),
             f"{fallback_date.isoformat()}:{kind}:{index}",
@@ -296,7 +322,9 @@ def _canonical_payload(kind: str, payload: dict[str, object]) -> dict[str, JsonV
                 "duration_min": duration_seconds / 60 if duration_seconds is not None else None,
                 "distance_m": _number(payload.get("distance")),
                 "training_load": _number(payload.get("activityTrainingLoad")),
-                "high_intensity_min": _number(payload.get("vigorousIntensityMinutes")),
+                "high_intensity_min": _non_negative_number(
+                    payload.get("vigorousIntensityMinutes")
+                ),
                 "avg_hr": _number(payload.get("averageHR")),
                 "max_hr": _number(payload.get("maxHR")),
                 "avg_speed_mps": _number(payload.get("averageSpeed")),
@@ -307,25 +335,51 @@ def _canonical_payload(kind: str, payload: dict[str, object]) -> dict[str, JsonV
             },
         )
     if kind == "daily-summary":
+        movement = _object(payload.get("movement")) or {}
+        heart_rate = _object(payload.get("heartRate")) or {}
+        body_battery = _object(payload.get("bodyBattery")) or {}
+        stress = _object(payload.get("stress")) or {}
         return cast(
             dict[str, JsonValue],
             {
                 "calendar_date": _scalar(payload.get("calendarDate")),
-                "steps": _number(payload.get("totalSteps")),
-                "resting_hr": _number(payload.get("restingHeartRate")),
-                "body_battery": _number(payload.get("bodyBatteryMostRecentValue")),
-                "average_stress": _number(payload.get("averageStressLevel")),
+                "steps": _coalesce_number(
+                    _first_number(payload, "totalSteps"),
+                    _first_number(movement, "steps"),
+                ),
+                "resting_hr": _coalesce_number(
+                    _first_number(payload, "restingHeartRate"),
+                    _first_number(heart_rate, "restingValue"),
+                ),
+                "body_battery": _coalesce_number(
+                    _first_number(payload, "bodyBatteryMostRecentValue"),
+                    _first_number(body_battery, "latestValue", "maxValue"),
+                ),
+                "average_stress": _coalesce_number(
+                    _first_number(payload, "averageStressLevel"),
+                    _first_number(stress, "avgLevel"),
+                ),
                 "sleep_seconds": _number(payload.get("sleepingSeconds")),
             },
         )
     if kind == "sleep":
-        summary = _object(payload.get("dailySleepDTO")) or payload
+        summary = (
+            _object(payload.get("dailySleepDTO"))
+            or _object(payload.get("values"))
+            or payload
+        )
         return cast(
             dict[str, JsonValue],
             {
-                "calendar_date": _scalar(summary.get("calendarDate")),
+                "calendar_date": _scalar(
+                    payload.get("calendarDate") or summary.get("calendarDate")
+                ),
                 "sleep_seconds": _first_number(
-                    summary, "sleepTimeSeconds", "sleepingSeconds", "totalSleepSeconds"
+                    summary,
+                    "sleepTimeSeconds",
+                    "sleepingSeconds",
+                    "totalSleepSeconds",
+                    "totalSleepTimeInSeconds",
                 ),
             },
         )
@@ -339,22 +393,26 @@ def _canonical_payload(kind: str, payload: dict[str, object]) -> dict[str, JsonV
             },
         )
     if kind == "heart-rate":
+        values = _object(payload.get("values")) or payload
         return cast(
             dict[str, JsonValue],
             {
                 "calendar_date": _scalar(payload.get("calendarDate")),
-                "resting_hr": _number(payload.get("restingHeartRate")),
-                "min_hr": _number(payload.get("minHeartRate")),
-                "max_hr": _number(payload.get("maxHeartRate")),
+                "resting_hr": _first_number(values, "restingHeartRate", "restingHR"),
+                "min_hr": _first_number(values, "minHeartRate", "wellnessMinAvgHR"),
+                "max_hr": _first_number(values, "maxHeartRate", "wellnessMaxAvgHR"),
             },
         )
     if kind == "stress":
+        values = _object(payload.get("values")) or payload
         return cast(
             dict[str, JsonValue],
             {
                 "calendar_date": _scalar(payload.get("calendarDate")),
-                "average_stress": _number(payload.get("averageStressLevel")),
-                "max_stress": _number(payload.get("maxStressLevel")),
+                "average_stress": _first_number(
+                    values, "averageStressLevel", "overallStressLevel"
+                ),
+                "max_stress": _number(values.get("maxStressLevel")),
             },
         )
     if kind == "steps":
@@ -362,15 +420,16 @@ def _canonical_payload(kind: str, payload: dict[str, object]) -> dict[str, JsonV
             dict[str, JsonValue],
             {
                 "calendar_date": _scalar(payload.get("calendarDate")),
-                "steps": _number(payload.get("steps")),
+                "steps": _first_number(payload, "steps", "totalSteps"),
             },
         )
     if kind == "body-battery":
+        values = _object(payload.get("values")) or payload
         return cast(
             dict[str, JsonValue],
             {
-                "calendar_date": _scalar(payload.get("date")),
-                "body_battery": _latest_body_battery(payload),
+                "calendar_date": _scalar(payload.get("calendarDate") or payload.get("date")),
+                "body_battery": _latest_body_battery(values),
             },
         )
     if kind == "body-weight":
@@ -400,6 +459,11 @@ def _number(value: object) -> float | int | None:
     return value
 
 
+def _non_negative_number(value: object) -> float | int | None:
+    number = _number(value)
+    return number if number is not None and number >= 0 else None
+
+
 def _first_number(payload: dict[str, object], *keys: str) -> float | int | None:
     return next(
         (number for key in keys if (number := _number(payload.get(key))) is not None),
@@ -407,8 +471,18 @@ def _first_number(payload: dict[str, object], *keys: str) -> float | int | None:
     )
 
 
+def _coalesce_number(*values: float | int | None) -> float | int | None:
+    return next((value for value in values if value is not None), None)
+
+
 def _latest_body_battery(payload: dict[str, object]) -> float | int | None:
-    direct = _number(payload.get("bodyBatteryMostRecentValue"))
+    direct = _first_number(
+        payload,
+        "bodyBatteryMostRecentValue",
+        "latestValue",
+        "highBodyBattery",
+        "maxValue",
+    )
     if direct is not None:
         return direct
     values = payload.get("bodyBatteryValuesArray")

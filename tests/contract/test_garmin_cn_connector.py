@@ -94,6 +94,7 @@ class FakeGarminClient:
     def __init__(self, **kwargs: object) -> None:
         self.kwargs = kwargs
         self.login_paths: list[str] = []
+        self.range_calls: list[tuple[str, str, str]] = []
         self.display_name = "CN Athlete"
 
     def login(self, tokenstore: str) -> tuple[None, None]:
@@ -126,31 +127,69 @@ class FakeGarminClient:
             }
         ]
 
-    def get_user_summary(self, cdate: str) -> dict[str, object]:
-        return {"calendarDate": cdate, "totalSteps": 9000}
+    def get_daily_summaries(self, start: str, end: str) -> dict[str, object]:
+        self.range_calls.append(("daily-summary", start, end))
+        return {
+            "data": [
+                {
+                    "calendarDate": start,
+                    "movement": {"steps": 9000},
+                    "heartRate": {"restingValue": 52},
+                    "bodyBattery": {"latestValue": 74},
+                    "stress": {"avgLevel": 24},
+                }
+            ]
+        }
 
-    def get_steps_data(self, cdate: str) -> list[dict[str, object]]:
-        return [{"calendarDate": cdate, "steps": 9000}]
+    def get_daily_steps(self, start: str, end: str) -> list[dict[str, object]]:
+        self.range_calls.append(("steps", start, end))
+        return [{"calendarDate": start, "totalSteps": 9000}]
 
-    def get_sleep_data(self, cdate: str) -> dict[str, object]:
-        return {"dailySleepDTO": {"calendarDate": cdate, "sleepTimeSeconds": 28000}}
+    def get_sleep_daily(self, start: str, end: str) -> list[dict[str, object]]:
+        self.range_calls.append(("sleep", start, end))
+        return [
+            {
+                "calendarDate": start,
+                "values": {"totalSleepTimeInSeconds": 28000},
+            }
+        ]
 
-    def get_hrv_data(self, cdate: str) -> dict[str, object]:
-        return {"hrvSummary": {"calendarDate": cdate, "weeklyAvg": 52}}
+    def get_hrv_data_range(self, start: str, end: str) -> dict[str, object]:
+        self.range_calls.append(("hrv", start, end))
+        return {"hrvSummaries": [{"calendarDate": start, "weeklyAvg": 52}]}
 
-    def get_heart_rates(self, cdate: str) -> dict[str, object]:
-        return {"calendarDate": cdate, "restingHeartRate": 52}
-
-    def get_stress_data(self, cdate: str) -> dict[str, object]:
-        return {"calendarDate": cdate, "overallStressLevel": 24}
-
-    def get_body_battery(
-        self, startdate: str, enddate: str
+    def get_daily_heart_rate_stats(
+        self, start: str, end: str
     ) -> list[dict[str, object]]:
-        return [{"date": startdate, "charged": 55, "drained": 40}]
+        self.range_calls.append(("heart-rate", start, end))
+        return [{"calendarDate": start, "values": {"restingHR": 52}}]
 
-    def get_weigh_ins(self, startdate: str, enddate: str) -> dict[str, object]:
-        return {"startDate": startdate, "endDate": enddate, "totalAverage": 70000}
+    def get_daily_stress_stats(self, start: str, end: str) -> list[dict[str, object]]:
+        self.range_calls.append(("stress", start, end))
+        return [{"calendarDate": start, "values": {"overallStressLevel": 24}}]
+
+    def get_daily_body_battery_stats(
+        self, start: str, end: str
+    ) -> list[dict[str, object]]:
+        self.range_calls.append(("body-battery", start, end))
+        return [
+            {
+                "calendarDate": start,
+                "values": {"highBodyBattery": 74, "lowBodyBattery": 19},
+            }
+        ]
+
+    def get_weight_snapshot(self, start: str, end: str) -> dict[str, object]:
+        self.range_calls.append(("body-weight", start, end))
+        return {
+            "dateWeightList": [
+                {
+                    "samplePk": 7,
+                    "calendarDate": start,
+                    "weight": 70000,
+                }
+            ]
+        }
 
 
 class GarminCnSessionGatewayTests(unittest.TestCase):
@@ -223,6 +262,91 @@ class GarminCnSessionGatewayTests(unittest.TestCase):
             self.assertEqual(activity["source_id"], "42")
             self.assertEqual(activity["occurred_at"], "2026-10-26T07:30:00+08:00")
 
+    def test_fetch_uses_range_endpoints_once_per_category(self) -> None:
+        created: list[FakeGarminClient] = []
+
+        def factory(**kwargs: object) -> FakeGarminClient:
+            client = FakeGarminClient(**kwargs)
+            created.append(client)
+            return client
+
+        with TemporaryDirectory() as directory:
+            gateway = connector.GarminCnSessionGateway(
+                token_dir=Path(directory) / "tokens" / "garmin-cn-session",
+                client_factory=factory,
+            )
+
+            gateway.fetch(date(2026, 10, 1), date(2026, 10, 28))
+
+            self.assertEqual(
+                created[0].range_calls,
+                [
+                    ("daily-summary", "2026-10-01", "2026-10-28"),
+                    ("steps", "2026-10-01", "2026-10-28"),
+                    ("sleep", "2026-10-01", "2026-10-28"),
+                    ("hrv", "2026-10-01", "2026-10-28"),
+                    ("heart-rate", "2026-10-01", "2026-10-28"),
+                    ("stress", "2026-10-01", "2026-10-28"),
+                    ("body-battery", "2026-10-01", "2026-10-28"),
+                    ("body-weight", "2026-10-01", "2026-10-28"),
+                ],
+            )
+
+    def test_normalizes_nested_range_metrics(self) -> None:
+        cases = {
+            "daily-summary": (
+                {
+                    "calendarDate": "2026-10-26",
+                    "movement": {"steps": 9000},
+                    "heartRate": {"restingValue": 52},
+                    "bodyBattery": {"latestValue": 74},
+                    "stress": {"avgLevel": 24},
+                },
+                {"steps": 9000, "resting_hr": 52, "body_battery": 74},
+            ),
+            "steps": (
+                {"calendarDate": "2026-10-26", "totalSteps": 9000},
+                {"steps": 9000},
+            ),
+            "sleep": (
+                {
+                    "calendarDate": "2026-10-26",
+                    "values": {"totalSleepTimeInSeconds": 28000},
+                },
+                {"sleep_seconds": 28000},
+            ),
+            "heart-rate": (
+                {"calendarDate": "2026-10-26", "values": {"restingHR": 52}},
+                {"resting_hr": 52},
+            ),
+            "stress": (
+                {
+                    "calendarDate": "2026-10-26",
+                    "values": {"overallStressLevel": 24},
+                },
+                {"average_stress": 24},
+            ),
+            "body-battery": (
+                {
+                    "calendarDate": "2026-10-26",
+                    "values": {"highBodyBattery": 74, "lowBodyBattery": 19},
+                },
+                {"body_battery": 74},
+            ),
+        }
+        for kind, (payload, expected) in cases.items():
+            with self.subTest(kind=kind):
+                raw = connector.GarminCnConnector._to_raw(
+                    {
+                        "kind": kind,
+                        "source_id": f"2026-10-26:{kind}",
+                        "occurred_at": "2026-10-26T00:00:00+08:00",
+                        "payload": payload,
+                    }
+                )
+                for key, value in expected.items():
+                    self.assertEqual(raw.canonical_payload[key], value)
+
     def test_connector_keeps_vendor_payload_but_exposes_canonical_activity_metrics(self) -> None:
         with TemporaryDirectory() as directory:
             gateway = connector.GarminCnSessionGateway(
@@ -283,6 +407,21 @@ class GarminCnSessionGatewayTests(unittest.TestCase):
 
         self.assertEqual(sleep.canonical_payload["sleep_seconds"], 28000)
         self.assertEqual(hrv.canonical_payload["hrv"], 61)
+
+    def test_treats_negative_vendor_intensity_sentinel_as_missing(self) -> None:
+        activity = connector.GarminCnConnector._to_raw(
+            {
+                "kind": "activity",
+                "source_id": "42",
+                "occurred_at": "2026-10-26T07:30:00+08:00",
+                "payload": {
+                    "activityId": 42,
+                    "vigorousIntensityMinutes": -1,
+                },
+            }
+        )
+
+        self.assertIsNone(activity.canonical_payload["high_intensity_min"])
 
 
 if __name__ == "__main__":

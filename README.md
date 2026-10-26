@@ -68,8 +68,12 @@ athlete-growth restore profile.zip --target-home /path/to/new-private-home
 ```bash
 athlete-growth garmin-cn-login --email "your-cn-account@example.com"
 athlete-growth sync --start 2026-10-01 --end 2026-10-26
+# 首次全量回填（默认每 28 天落盘一批，中断后可安全重跑）
+athlete-growth sync --start 2024-06-04 --end 2026-10-26 --chunk-days 28
 athlete-growth garmin-cn-revoke
 ```
+
+同步覆盖活动、每日汇总、步数、睡眠、HRV、心率、压力、身体电量和体重。批次完成后立即落盘；重跑同一时间段时，来源身份和内容都未变的记录只计为重复，不会再写一份。旧格式分时片段会保留为可审计历史，不再进入当前分析视图。
 
 连接器使用开源 `python-garminconnect` 的中国区登录能力，不把 MCP 运行时变成产品必需依赖。这是非官方 Garmin Connect 接口，可能因服务变更或账户限制失效；故障时继续使用 FIT/TCX/CSV/JSON 导入，已有数据不会被覆盖。只允许本地 stdio MCP 作为可选 AI 桥接，不建议将健康账户凭据交给托管 MCP。详见 [Garmin 中国区认证决策](docs/adr/0006-garmin-cn-session-and-optional-mcp.md)。
 

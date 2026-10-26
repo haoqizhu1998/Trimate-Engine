@@ -67,6 +67,12 @@ def _build_parser() -> argparse.ArgumentParser:
     sync_parser = subcommands.add_parser("sync", help="sync Garmin China read-only data")
     sync_parser.add_argument("--start", type=date.fromisoformat, required=True)
     sync_parser.add_argument("--end", type=date.fromisoformat, required=True)
+    sync_parser.add_argument(
+        "--chunk-days",
+        type=int,
+        default=28,
+        help="persist long syncs in restart-safe chunks (1-28, default: 28)",
+    )
     add_home(sync_parser)
 
     login_parser = subcommands.add_parser(

@@ -5,15 +5,20 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from time import sleep
 
 from athlete_growth.adapters.storage.sqlite_records import SQLiteRecordStore
 from athlete_growth.domain.records import CanonicalRecord, EvidenceRef, JsonValue
-from athlete_growth.ports.data_source import DataSourceConnector, SyncBatch, SyncWindow
+from athlete_growth.ports.data_source import (
+    DataSourceConnector,
+    RawSourceRecord,
+    SyncBatch,
+    SyncWindow,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,6 +81,11 @@ class IngestionService:
                 quality_flags=flags,
             )
             source_key = (raw.source, raw.kind, raw.source_id)
+            retired += self._retire_legacy_daily_duplicates(
+                raw,
+                canonical_payload,
+                current_by_source,
+            )
             existing_versions = current_by_source.get(source_key, [])
             existing = next(
                 (
@@ -122,6 +132,50 @@ class IngestionService:
                 )
         return IngestionResult(inserted, updated, retired, duplicates, raw_files)
 
+    def _retire_legacy_daily_duplicates(
+        self,
+        raw: RawSourceRecord,
+        canonical_payload: Mapping[str, JsonValue],
+        current_by_source: dict[tuple[str, str, str], list[CanonicalRecord]],
+    ) -> int:
+        """Replace legacy per-day fragments once a canonical daily row arrives."""
+        if raw.kind == "body-weight" and ":body-weight:" not in raw.source_id:
+            return self._retire_matching_source_ids(
+                raw,
+                current_by_source,
+                lambda source_id: ":body-weight:" in source_id,
+            )
+        daily_kinds = {"steps", "sleep", "hrv", "heart-rate", "stress", "body-battery"}
+        calendar_date = canonical_payload.get("calendar_date")
+        if (
+            raw.kind not in daily_kinds
+            or not isinstance(calendar_date, str)
+            or raw.source_id != calendar_date
+        ):
+            return 0
+        legacy_prefix = f"{calendar_date}:{raw.kind}:"
+        return self._retire_matching_source_ids(
+            raw,
+            current_by_source,
+            lambda source_id: source_id.startswith(legacy_prefix),
+        )
+
+    def _retire_matching_source_ids(
+        self,
+        raw: RawSourceRecord,
+        current_by_source: dict[tuple[str, str, str], list[CanonicalRecord]],
+        matches: Callable[[str], bool],
+    ) -> int:
+        retired = 0
+        for source_key in list(current_by_source):
+            source, kind, source_id = source_key
+            if source != raw.source or kind != raw.kind or not matches(source_id):
+                continue
+            for record in current_by_source.pop(source_key):
+                self.store.retire(record.record_id)
+                retired += 1
+        return retired
+
     @staticmethod
     def _equivalent(existing: CanonicalRecord, candidate: CanonicalRecord) -> bool:
         def evidence_identity(record: CanonicalRecord) -> tuple[tuple[str, str, str | None], ...]:
@@ -158,6 +212,37 @@ class IngestionService:
                     sleep(0.05 * (2**attempt))
         assert last_error is not None
         raise last_error
+
+    def sync_chunked(
+        self,
+        connector: DataSourceConnector,
+        window: SyncWindow,
+        *,
+        chunk_days: int = 28,
+    ) -> IngestionResult:
+        """Persist a long sync window in bounded, idempotent chunks."""
+        if chunk_days < 1:
+            raise ValueError("chunk_days must be at least 1")
+        totals = [0, 0, 0, 0, 0]
+        chunk_start = window.start
+        while chunk_start <= window.end:
+            chunk_end = min(
+                chunk_start + timedelta(days=chunk_days - 1),
+                window.end,
+            )
+            result = self.sync(connector, SyncWindow(chunk_start, chunk_end))
+            for index, value in enumerate(
+                (
+                    result.inserted,
+                    result.updated,
+                    result.retired,
+                    result.duplicates,
+                    result.raw_files,
+                )
+            ):
+                totals[index] += value
+            chunk_start = chunk_end + timedelta(days=1)
+        return IngestionResult(*totals)
 
     @staticmethod
     def _quality_flags(payload: Mapping[str, JsonValue]) -> tuple[str, ...]:

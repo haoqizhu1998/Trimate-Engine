@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import unittest
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -11,6 +11,62 @@ from athlete_growth.ports import data_source
 
 
 class IngestionTests(unittest.TestCase):
+    def test_syncs_long_ranges_in_restart_safe_chunks(self) -> None:
+        class RecordingConnector:
+            def __init__(self) -> None:
+                self.windows: list[data_source.SyncWindow] = []
+
+            def capabilities(self) -> data_source.SourceCapabilities:
+                return data_source.SourceCapabilities("garmin-cn", "cn", ("daily-summary",))
+
+            def sync(
+                self, window: data_source.SyncWindow, cursor: str | None
+            ) -> data_source.SyncBatch:
+                self.windows.append(window)
+                occurred_at = datetime.combine(window.start, datetime.min.time(), tzinfo=UTC)
+                return data_source.SyncBatch(
+                    (
+                        data_source.RawSourceRecord(
+                            source="garmin-cn",
+                            kind="daily-summary",
+                            source_id=window.start.isoformat(),
+                            occurred_at=occurred_at,
+                            payload={"calendarDate": window.start.isoformat()},
+                        ),
+                    ),
+                    next_cursor=window.end.isoformat(),
+                )
+
+            def healthcheck(self) -> data_source.HealthStatus:
+                return data_source.HealthStatus(True, "connected")
+
+            def revoke(self) -> None:
+                return None
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = SQLiteRecordStore(root / "athlete.sqlite3")
+            ingestion = service.IngestionService(
+                athlete_id="athlete-001", store=store, raw_dir=root / "raw"
+            )
+            connector = RecordingConnector()
+            window = data_source.SyncWindow(date(2026, 1, 1), date(2026, 3, 1))
+
+            first = ingestion.sync_chunked(connector, window, chunk_days=28)
+            second = ingestion.sync_chunked(connector, window, chunk_days=28)
+
+            self.assertEqual(
+                connector.windows[:3],
+                [
+                    data_source.SyncWindow(date(2026, 1, 1), date(2026, 1, 28)),
+                    data_source.SyncWindow(date(2026, 1, 29), date(2026, 2, 25)),
+                    data_source.SyncWindow(date(2026, 2, 26), date(2026, 3, 1)),
+                ],
+            )
+            self.assertEqual((first.inserted, first.duplicates), (3, 0))
+            self.assertEqual((second.inserted, second.duplicates), (0, 3))
+            self.assertEqual(store.get_cursor("athlete-001", "garmin-cn"), "2026-03-01")
+
     def test_ingests_idempotently_and_preserves_raw_evidence(self) -> None:
         ingestion_type = getattr(service, "IngestionService", None)
         raw_type = getattr(data_source, "RawSourceRecord", None)
@@ -198,6 +254,74 @@ class IngestionTests(unittest.TestCase):
             self.assertEqual(result.retired, 1)
             self.assertEqual(len(current), 1)
             self.assertEqual(current[0].data["average_stress"], 25)
+
+    def test_daily_range_record_retires_legacy_intraday_duplicates(self) -> None:
+        occurred_at = datetime(2026, 10, 26, 0, 0, tzinfo=UTC)
+        legacy = data_source.RawSourceRecord(
+            source="garmin-cn",
+            kind="steps",
+            source_id="2026-10-26:steps:0",
+            occurred_at=occurred_at,
+            payload={"steps": 100},
+            canonical_payload={"calendar_date": None, "steps": 100},
+        )
+        daily = data_source.RawSourceRecord(
+            source="garmin-cn",
+            kind="steps",
+            source_id="2026-10-26",
+            occurred_at=occurred_at,
+            payload={"calendarDate": "2026-10-26", "totalSteps": 9000},
+            canonical_payload={"calendar_date": "2026-10-26", "steps": 9000},
+        )
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = SQLiteRecordStore(root / "athlete.sqlite3")
+            ingestion = service.IngestionService(
+                athlete_id="athlete-001", store=store, raw_dir=root / "raw"
+            )
+            ingestion.ingest(data_source.SyncBatch((legacy,)))
+
+            result = ingestion.ingest(data_source.SyncBatch((daily,)))
+
+            current = store.list_current("athlete-001", kind="steps")
+            self.assertEqual(result.retired, 1)
+            self.assertEqual(len(current), 1)
+            self.assertEqual(current[0].data["steps"], 9000)
+
+    def test_weight_snapshot_retires_legacy_range_envelope(self) -> None:
+        occurred_at = datetime(2026, 10, 22, 0, 0, tzinfo=UTC)
+        legacy = data_source.RawSourceRecord(
+            source="garmin-cn",
+            kind="body-weight",
+            source_id="2026-10-20:body-weight:0",
+            occurred_at=occurred_at,
+            payload={"startDate": "2026-10-20", "endDate": "2026-10-26"},
+            canonical_payload={"calendar_date": None, "weight_kg": None},
+        )
+        weigh_in = data_source.RawSourceRecord(
+            source="garmin-cn",
+            kind="body-weight",
+            source_id="1792660522258",
+            occurred_at=occurred_at,
+            payload={"calendarDate": "2026-10-22", "weight": 70000},
+            canonical_payload={"calendar_date": "2026-10-22", "weight_kg": 70.0},
+        )
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = SQLiteRecordStore(root / "athlete.sqlite3")
+            ingestion = service.IngestionService(
+                athlete_id="athlete-001", store=store, raw_dir=root / "raw"
+            )
+            ingestion.ingest(data_source.SyncBatch((legacy,)))
+
+            result = ingestion.ingest(data_source.SyncBatch((weigh_in,)))
+
+            current = store.list_current("athlete-001", kind="body-weight")
+            self.assertEqual(result.retired, 1)
+            self.assertEqual(len(current), 1)
+            self.assertEqual(current[0].data["weight_kg"], 70.0)
 
 
 if __name__ == "__main__":
