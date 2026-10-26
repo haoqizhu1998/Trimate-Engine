@@ -1,0 +1,43 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "athlete-growth"
+version = "0.1.0"
+description = "Local-first personal training analysis and growth toolkit"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "Proprietary" }
+authors = [{ name = "Mucci" }]
+dependencies = [
+  "fitdecode>=0.11,<1",
+  "garmin-connect-personal-api-python>=1.0,<2",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pyright>=1.1,<2",
+  "ruff>=0.9,<1",
+]
+
+[project.scripts]
+athlete-growth = "athlete_growth.interfaces.cli.main:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/athlete_growth"]
+
+[tool.pyright]
+pythonVersion = "3.12"
+include = ["src"]
+typeCheckingMode = "standard"
+venvPath = "."
+venv = ".venv"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+extend-exclude = ["data"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]

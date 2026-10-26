@@ -1,0 +1,123 @@
+"""Evidence-backed daily and weekly reports."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import UTC, date, datetime, time, timedelta
+
+from athlete_growth.adapters.storage.sqlite_records import SQLiteRecordStore
+from athlete_growth.application.analyze.service import TrainingAnalytics
+from athlete_growth.domain.analytics import AnalysisResult
+from athlete_growth.domain.records import JsonValue
+from athlete_growth.domain.safety import SafetyAssessment, SafetyRules
+
+
+@dataclass(frozen=True, slots=True)
+class WellnessReport:
+    period: str
+    objective: dict[str, JsonValue]
+    subjective: dict[str, JsonValue] | None
+    analytics: AnalysisResult
+    safety: SafetyAssessment
+    evidence_ids: tuple[str, ...]
+    data_gaps: tuple[str, ...]
+    confidence: float
+    algorithm_version: str = "wellness-report/1.0"
+
+
+class ReportService:
+    def __init__(self, athlete_id: str, store: SQLiteRecordStore) -> None:
+        self.athlete_id = athlete_id
+        self.store = store
+        self.analytics = TrainingAnalytics()
+        self.safety_rules = SafetyRules()
+
+    def daily(self, calendar_date: date) -> WellnessReport:
+        start = datetime.combine(calendar_date, time.min, tzinfo=UTC)
+        end = start + timedelta(days=1) - timedelta(microseconds=1)
+        records = self.store.list_current(self.athlete_id, start=start, end=end)
+        objective_records = [record for record in records if record.kind == "daily-summary"]
+        check_ins = [record for record in records if record.kind == "check-in"]
+        objective: dict[str, JsonValue] = {}
+        for record in objective_records:
+            objective.update(record.data)
+        check_in = check_ins[-1] if check_ins else None
+        subjective = dict(check_in.data) if check_in else None
+        history_start = start - timedelta(days=28)
+        history = self.store.list_current(self.athlete_id, start=history_start, end=end)
+        analytics = self.analytics.analyze(history, as_of=end)
+        safety = self.safety_rules.assess(
+            check_in=check_in,
+            observations=objective_records,
+            acute_load=self._metric(analytics, "acute_load"),
+            chronic_load=self._metric(analytics, "chronic_weekly_load"),
+        )
+        evidence = tuple(
+            dict.fromkeys(
+                evidence.raw_hash or record.record_id
+                for record in records
+                for evidence in record.evidence
+            )
+        )
+        gaps = list(analytics.data_gaps) + list(safety.data_gaps)
+        if not objective_records:
+            gaps.append("objective daily summary")
+        confidence = min(analytics.confidence, 0.9 if check_in else 0.45)
+        return WellnessReport(
+            calendar_date.isoformat(),
+            objective,
+            subjective,
+            analytics,
+            safety,
+            evidence,
+            tuple(dict.fromkeys(gaps)),
+            confidence,
+        )
+
+    def weekly(self, end_date: date) -> WellnessReport:
+        end = datetime.combine(end_date + timedelta(days=1), time.min, tzinfo=UTC) - timedelta(
+            microseconds=1
+        )
+        start = end - timedelta(days=7) + timedelta(microseconds=1)
+        records = self.store.list_current(self.athlete_id, start=start, end=end)
+        analytics = self.analytics.analyze(
+            self.store.list_current(self.athlete_id, start=end - timedelta(days=28), end=end),
+            as_of=end,
+        )
+        latest_check_in = next(
+            (record for record in reversed(records) if record.kind == "check-in"), None
+        )
+        observations = [record for record in records if record.kind == "daily-summary"]
+        safety = self.safety_rules.assess(
+            check_in=latest_check_in,
+            observations=observations[-1:],
+            acute_load=self._metric(analytics, "acute_load"),
+            chronic_load=self._metric(analytics, "chronic_weekly_load"),
+        )
+        objective: dict[str, JsonValue] = {
+            "activity_count": sum(record.kind == "activity" for record in records),
+            "check_in_days": len(
+                {record.occurred_at.date() for record in records if record.kind == "check-in"}
+            ),
+        }
+        evidence = tuple(
+            dict.fromkeys(
+                item.raw_hash or record.record_id for record in records for item in record.evidence
+            )
+        )
+        gaps = list(analytics.data_gaps) + list(safety.data_gaps)
+        return WellnessReport(
+            f"{start.date().isoformat()}/{end_date.isoformat()}",
+            objective,
+            dict(latest_check_in.data) if latest_check_in else None,
+            analytics,
+            safety,
+            evidence,
+            tuple(dict.fromkeys(gaps)),
+            analytics.confidence,
+        )
+
+    @staticmethod
+    def _metric(result: AnalysisResult, name: str) -> float | None:
+        value = result.metrics.get(name)
+        return float(value) if isinstance(value, (int, float)) else None

@@ -1,0 +1,2 @@
+kind,source_id,occurred_at,sport,duration_min,distance_m,avg_hr,training_load
+activity,csv-run-1,2026-10-25T08:00:00+08:00,running,30,5000,145,75

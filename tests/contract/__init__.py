@@ -1,0 +1,1 @@
+"""External adapter contract tests."""
