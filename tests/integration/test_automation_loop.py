@@ -813,6 +813,47 @@ class AutomaticTrainingLoopTests(unittest.TestCase):
         self.assertEqual((result.completed, result.failed), (1, 0))
         self.assertEqual(committed_change_sets_seen, [0])
 
+    def test_lease_expiry_during_raw_promotion_rolls_back_database_work(self) -> None:
+        self.add_profile()
+        self.add_subscription("watch")
+        connector = MutableConnector(
+            "watch",
+            (
+                _record(
+                    "watch",
+                    "check-in",
+                    "expires-during-promotion",
+                    occurred_at=datetime(2026, 10, 26, 8, 0, tzinfo=UTC),
+                    pain=0,
+                ),
+            ),
+            next_cursor="must-rollback",
+        )
+        original_promote = IngestionService.promote_raw_files
+
+        def promote_then_expire(ingestion_result) -> None:
+            original_promote(ingestion_result)
+            self.clock.now += timedelta(minutes=6)
+
+        with patch.object(
+            IngestionService,
+            "promote_raw_files",
+            side_effect=promote_then_expire,
+        ):
+            result = self.loop({"watch": connector}).run_once(limit=1)
+
+        run = self.automation.latest_sync_run("athlete-001", "watch")
+        assert run is not None
+        self.assertEqual((result.completed, result.failed), (0, 1))
+        self.assertEqual(run.status, "running")
+        self.assertIn(
+            run.run_id,
+            {item.run_id for item in self.automation.list_recoverable_runs(self.clock())},
+        )
+        self.assertEqual(self.records.list_current("athlete-001"), [])
+        self.assertIsNone(self.records.get_cursor("athlete-001", "watch"))
+        self.assertEqual(self.table_count("data_change_sets"), 0)
+
     def test_recovery_refuses_a_change_set_with_missing_raw_evidence(self) -> None:
         self.add_profile()
         self.add_subscription("watch")
@@ -938,6 +979,45 @@ class AutomaticTrainingLoopTests(unittest.TestCase):
         self.assertEqual((current.status, current.lease_owner), ("running", "snapshot-takeover"))
         self.assertEqual(self.automation.list_snapshots("athlete-001"), [])
 
+    def test_lease_expiry_before_snapshot_transaction_blocks_first_snapshot(self) -> None:
+        self.add_profile()
+        self.add_subscription("watch")
+        connector = MutableConnector(
+            "watch",
+            (
+                _record(
+                    "watch",
+                    "check-in",
+                    "expires-before-snapshot",
+                    occurred_at=datetime(2026, 10, 26, 8, 0, tzinfo=UTC),
+                    pain=0,
+                ),
+            ),
+        )
+        original_save = self.automation.save_snapshot
+
+        def expire_then_save(*args, **kwargs):
+            self.clock.now += timedelta(minutes=6)
+            return original_save(*args, **kwargs)
+
+        with patch.object(
+            self.automation,
+            "save_snapshot",
+            side_effect=expire_then_save,
+        ):
+            result = self.loop({"watch": connector}).run_once(limit=1)
+
+        run = self.automation.latest_sync_run("athlete-001", "watch")
+        assert run is not None
+        self.assertEqual((result.completed, result.failed), (0, 1))
+        self.assertEqual(run.status, "running")
+        self.assertIn(
+            run.run_id,
+            {item.run_id for item in self.automation.list_recoverable_runs(self.clock())},
+        )
+        self.assertEqual(self.automation.list_snapshots("athlete-001"), [])
+        self.assertEqual(self.automation.list_unread("athlete-001"), [])
+
     def test_reclaim_immediately_before_notification_fences_the_stale_effect_write(self) -> None:
         self.add_profile()
         self.add_subscription("watch")
@@ -981,6 +1061,84 @@ class AutomaticTrainingLoopTests(unittest.TestCase):
             (current.status, current.lease_owner),
             ("running", "notification-takeover"),
         )
+        self.assertEqual(self.automation.list_unread("athlete-001"), [])
+
+    def test_lease_expiry_before_notification_transaction_blocks_notification(self) -> None:
+        self.add_profile()
+        self.add_subscription("watch")
+        connector = MutableConnector(
+            "watch",
+            (
+                _record(
+                    "watch",
+                    "check-in",
+                    "expires-before-notification",
+                    occurred_at=datetime(2026, 10, 26, 8, 0, tzinfo=UTC),
+                    pain=0,
+                ),
+            ),
+        )
+        original_enqueue = self.automation.enqueue_notification
+
+        def expire_then_enqueue(*args, **kwargs):
+            self.clock.now += timedelta(minutes=6)
+            return original_enqueue(*args, **kwargs)
+
+        with patch.object(
+            self.automation,
+            "enqueue_notification",
+            side_effect=expire_then_enqueue,
+        ):
+            result = self.loop({"watch": connector}).run_once(limit=1)
+
+        run = self.automation.latest_sync_run("athlete-001", "watch")
+        assert run is not None
+        self.assertEqual((result.completed, result.failed), (0, 1))
+        self.assertEqual(run.status, "running")
+        self.assertIn(
+            run.run_id,
+            {item.run_id for item in self.automation.list_recoverable_runs(self.clock())},
+        )
+        self.assertEqual(len(self.automation.list_snapshots("athlete-001")), 2)
+        self.assertEqual(self.automation.list_unread("athlete-001"), [])
+
+    def test_lease_expiry_before_terminal_transaction_prevents_completion(self) -> None:
+        self.add_profile()
+        self.add_subscription("watch", mode=NotificationMode.OFF)
+        connector = MutableConnector(
+            "watch",
+            (
+                _record(
+                    "watch",
+                    "check-in",
+                    "expires-before-completion",
+                    occurred_at=datetime(2026, 10, 26, 8, 0, tzinfo=UTC),
+                    pain=0,
+                ),
+            ),
+        )
+        original_complete = self.automation.complete_sync_run
+
+        def expire_then_complete(*args, **kwargs):
+            self.clock.now += timedelta(minutes=6)
+            return original_complete(*args, **kwargs)
+
+        with patch.object(
+            self.automation,
+            "complete_sync_run",
+            side_effect=expire_then_complete,
+        ):
+            result = self.loop({"watch": connector}).run_once(limit=1)
+
+        run = self.automation.latest_sync_run("athlete-001", "watch")
+        assert run is not None
+        self.assertEqual((result.completed, result.failed), (0, 1))
+        self.assertEqual(run.status, "running")
+        self.assertIn(
+            run.run_id,
+            {item.run_id for item in self.automation.list_recoverable_runs(self.clock())},
+        )
+        self.assertEqual(len(self.automation.list_snapshots("athlete-001")), 2)
         self.assertEqual(self.automation.list_unread("athlete-001"), [])
 
     def test_each_due_run_is_claimed_just_in_time(self) -> None:

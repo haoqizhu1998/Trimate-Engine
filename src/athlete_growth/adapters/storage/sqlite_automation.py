@@ -6,7 +6,7 @@ import hashlib
 import json
 import os
 import sqlite3
-from collections.abc import Collection, Iterator
+from collections.abc import Callable, Collection, Iterator
 from contextlib import contextmanager
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -549,9 +549,10 @@ class SQLiteAutomationRepository:
         owner: str | None = None,
         lease_duration: timedelta = timedelta(minutes=15),
         exclude: Collection[tuple[str, str]] = (),
+        lease_clock: Callable[[], datetime] | None = None,
     ) -> list[tuple[SyncSubscription, SyncRun]]:
-        claimed_at = self._datetime(now, "now")
-        lease_expires_at = self._lease_expiry(claimed_at, lease_duration)
+        fallback_now = self._datetime(now, "now")
+        self._lease_expiry(fallback_now, lease_duration)
         if not reason.strip():
             raise ValueError("reason must not be blank")
         if owner is not None and not owner.strip():
@@ -563,13 +564,15 @@ class SQLiteAutomationRepository:
             " AND NOT (sync_subscriptions.athlete_id = ? AND sync_subscriptions.source = ?)"
             for _ in excluded
         )
-        parameters: list[object] = [claimed_at.isoformat()]
-        for athlete_id, source in excluded:
-            parameters.extend((athlete_id, source))
-        parameters.append(limit)
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
+            claimed_at = self._lease_time(lease_clock, fallback_now, "now")
+            lease_expires_at = self._lease_expiry(claimed_at, lease_duration)
+            parameters: list[object] = [claimed_at.isoformat()]
+            for athlete_id, source in excluded:
+                parameters.extend((athlete_id, source))
+            parameters.append(limit)
             rows = connection.execute(
                 f"""
                 SELECT * FROM sync_subscriptions
@@ -642,6 +645,9 @@ class SQLiteAutomationRepository:
                 )
                 if run.status == "running":
                     claims.append((subscription, run))
+            commit_at = self._lease_time(lease_clock, fallback_now, "now")
+            if claims and lease_expires_at <= commit_at:
+                raise ValueError("claimed sync run lease expired before commit")
             connection.commit()
             return claims
         except BaseException:
@@ -746,6 +752,7 @@ class SQLiteAutomationRepository:
         *,
         completed_at: datetime,
         lease_token: str | None = None,
+        lease_clock: Callable[[], datetime] | None = None,
     ) -> SyncRun:
         return self._finish_sync_run(
             run_id,
@@ -753,6 +760,7 @@ class SQLiteAutomationRepository:
             completed_at=completed_at,
             error=None,
             lease_token=lease_token,
+            lease_clock=lease_clock,
         )
 
     def fail_sync_run(
@@ -762,6 +770,7 @@ class SQLiteAutomationRepository:
         error: str,
         completed_at: datetime,
         lease_token: str | None = None,
+        lease_clock: Callable[[], datetime] | None = None,
     ) -> SyncRun:
         if not error.strip():
             raise ValueError("error must not be blank")
@@ -771,6 +780,7 @@ class SQLiteAutomationRepository:
             completed_at=completed_at,
             error=error,
             lease_token=lease_token,
+            lease_clock=lease_clock,
         )
 
     def _finish_sync_run(
@@ -781,6 +791,7 @@ class SQLiteAutomationRepository:
         completed_at: datetime,
         error: str | None,
         lease_token: str | None,
+        lease_clock: Callable[[], datetime] | None,
     ) -> SyncRun:
         completed = self._datetime(completed_at, "completed_at")
         connection = self._connect()
@@ -796,6 +807,10 @@ class SQLiteAutomationRepository:
             if existing.status == "running":
                 if existing.lease_token != lease_token:
                     raise ValueError("sync run lease token conflict")
+                if existing.lease_token is not None:
+                    checked_at = self._lease_time(lease_clock, completed, "completed_at")
+                    if existing.lease_expires_at is None or existing.lease_expires_at <= checked_at:
+                        raise ValueError("sync run lease has expired")
                 assert existing.updated_at is not None
                 if completed < existing.updated_at:
                     raise ValueError("completed_at must not be earlier than updated_at")
@@ -846,6 +861,10 @@ class SQLiteAutomationRepository:
             ).fetchone()
             assert row is not None
             result = self._sync_run_from_row(row)
+            if existing.lease_token is not None:
+                commit_at = self._lease_time(lease_clock, completed, "completed_at")
+                if existing.lease_expires_at is None or existing.lease_expires_at <= commit_at:
+                    raise ValueError("sync run lease expired before commit")
             connection.commit()
             return result
         except BaseException:
@@ -931,10 +950,11 @@ class SQLiteAutomationRepository:
         lease_token: str,
         owner: str,
         now: datetime,
+        lease_clock: Callable[[], datetime] | None = None,
     ) -> Iterator[sqlite3.Connection]:
         """Hold the SQLite write lock while lease-owned ingestion is committed."""
 
-        checked_at = self._datetime(now, "now")
+        fallback_now = self._datetime(now, "now")
         if not lease_token.strip():
             raise ValueError("lease token must not be blank")
         if not owner.strip():
@@ -947,9 +967,16 @@ class SQLiteAutomationRepository:
                 run_id,
                 lease_token=lease_token,
                 owner=owner,
-                now=checked_at,
+                now=self._lease_time(lease_clock, fallback_now, "now"),
             )
             yield connection
+            self._validate_owned_lease(
+                connection,
+                run_id,
+                lease_token=lease_token,
+                owner=owner,
+                now=self._lease_time(lease_clock, fallback_now, "now"),
+            )
             connection.commit()
         except BaseException:
             if connection.in_transaction:
@@ -991,14 +1018,17 @@ class SQLiteAutomationRepository:
         now: datetime,
         owner: str | None = None,
         lease_duration: timedelta = timedelta(minutes=15),
+        lease_clock: Callable[[], datetime] | None = None,
     ) -> SyncRun:
-        reclaimed_at = self._datetime(now, "now")
-        lease_expires_at = self._lease_expiry(reclaimed_at, lease_duration)
+        fallback_now = self._datetime(now, "now")
+        self._lease_expiry(fallback_now, lease_duration)
         if owner is not None and not owner.strip():
             raise ValueError("owner must not be blank")
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
+            reclaimed_at = self._lease_time(lease_clock, fallback_now, "now")
+            lease_expires_at = self._lease_expiry(reclaimed_at, lease_duration)
             row = connection.execute(
                 "SELECT * FROM automation_sync_runs WHERE run_id = ?",
                 (run_id,),
@@ -1041,6 +1071,9 @@ class SQLiteAutomationRepository:
             ).fetchone()
             assert row is not None
             result = self._sync_run_from_row(row)
+            commit_at = self._lease_time(lease_clock, fallback_now, "now")
+            if lease_expires_at <= commit_at:
+                raise ValueError("reclaimed sync run lease expired before commit")
             connection.commit()
             return result
         except BaseException:
@@ -1058,9 +1091,10 @@ class SQLiteAutomationRepository:
         owner: str,
         now: datetime,
         lease_duration: timedelta = timedelta(minutes=15),
+        lease_clock: Callable[[], datetime] | None = None,
     ) -> SyncRun:
-        renewed_at = self._datetime(now, "now")
-        lease_expires_at = self._lease_expiry(renewed_at, lease_duration)
+        fallback_now = self._datetime(now, "now")
+        self._lease_expiry(fallback_now, lease_duration)
         if not lease_token.strip():
             raise ValueError("lease token must not be blank")
         if not owner.strip():
@@ -1068,6 +1102,8 @@ class SQLiteAutomationRepository:
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
+            renewed_at = self._lease_time(lease_clock, fallback_now, "now")
+            lease_expires_at = self._lease_expiry(renewed_at, lease_duration)
             row = connection.execute(
                 "SELECT * FROM automation_sync_runs WHERE run_id = ?",
                 (run_id,),
@@ -1112,6 +1148,13 @@ class SQLiteAutomationRepository:
             ).fetchone()
             assert row is not None
             result = self._sync_run_from_row(row)
+            commit_at = self._lease_time(lease_clock, fallback_now, "now")
+            if (
+                existing.lease_expires_at is None
+                or existing.lease_expires_at <= commit_at
+                or lease_expires_at <= commit_at
+            ):
+                raise ValueError("sync run lease expired before renewal commit")
             connection.commit()
             return result
         except BaseException:
@@ -1129,6 +1172,7 @@ class SQLiteAutomationRepository:
         created_at: datetime,
         lease_token: str | None = None,
         connection: sqlite3.Connection | None = None,
+        lease_clock: Callable[[], datetime] | None = None,
     ) -> DataChangeSet:
         created = self._datetime(created_at, "created_at")
         if connection is not None:
@@ -1138,6 +1182,7 @@ class SQLiteAutomationRepository:
                 result,
                 created=created,
                 lease_token=lease_token,
+                lease_clock=lease_clock,
             )
         owned_connection = self._connect()
         try:
@@ -1148,6 +1193,7 @@ class SQLiteAutomationRepository:
                 result,
                 created=created,
                 lease_token=lease_token,
+                lease_clock=lease_clock,
             )
             owned_connection.commit()
             return change_set
@@ -1166,6 +1212,7 @@ class SQLiteAutomationRepository:
         *,
         created: datetime,
         lease_token: str | None,
+        lease_clock: Callable[[], datetime] | None,
     ) -> DataChangeSet:
         run_row = connection.execute(
             "SELECT * FROM automation_sync_runs WHERE run_id = ?",
@@ -1201,6 +1248,10 @@ class SQLiteAutomationRepository:
             raise ValueError("sync run must be running to create a change set")
         if run.lease_token != lease_token:
             raise ValueError("sync run lease token conflict")
+        if run.lease_token is not None:
+            checked_at = self._lease_time(lease_clock, created, "created_at")
+            if run.lease_expires_at is None or run.lease_expires_at <= checked_at:
+                raise ValueError("sync run lease has expired")
         connection.execute(
             """
             INSERT INTO data_change_sets (
@@ -1218,6 +1269,10 @@ class SQLiteAutomationRepository:
                 change_set.created_at.isoformat(),
             ),
         )
+        if run.lease_token is not None:
+            commit_at = self._lease_time(lease_clock, created, "created_at")
+            if run.lease_expires_at is None or run.lease_expires_at <= commit_at:
+                raise ValueError("sync run lease expired before change set commit")
         return change_set
 
     def _validate_effect_lease(
@@ -1229,6 +1284,7 @@ class SQLiteAutomationRepository:
         lease_token: str | None,
         lease_owner: str | None,
         lease_checked_at: datetime | None,
+        lease_clock: Callable[[], datetime] | None,
     ) -> SyncRun:
         row = connection.execute(
             "SELECT * FROM automation_sync_runs WHERE run_id = ?",
@@ -1247,10 +1303,10 @@ class SQLiteAutomationRepository:
             run_id != derived_run_id
             or lease_token != run.lease_token
             or lease_owner != run.lease_owner
-            or lease_checked_at is None
+            or (lease_checked_at is None and lease_clock is None)
         ):
             raise ValueError("sync run lease conflict")
-        checked_at = self._datetime(lease_checked_at, "lease_checked_at")
+        checked_at = self._lease_time(lease_clock, lease_checked_at, "lease_checked_at")
         if run.lease_expires_at is None or run.lease_expires_at <= checked_at:
             raise ValueError("sync run lease has expired")
         return run
@@ -1291,6 +1347,7 @@ class SQLiteAutomationRepository:
         lease_token: str | None = None,
         lease_owner: str | None = None,
         lease_checked_at: datetime | None = None,
+        lease_clock: Callable[[], datetime] | None = None,
     ) -> AnalysisSnapshot:
         period = report_payload.get("period")
         if not isinstance(period, str) or not period.strip():
@@ -1348,6 +1405,7 @@ class SQLiteAutomationRepository:
                 lease_token=lease_token,
                 lease_owner=lease_owner,
                 lease_checked_at=lease_checked_at,
+                lease_clock=lease_clock,
             )
             connection.execute(
                 """
@@ -1368,6 +1426,15 @@ class SQLiteAutomationRepository:
                     snapshot.risk_level,
                     snapshot.created_at.isoformat(),
                 ),
+            )
+            self._validate_effect_lease(
+                connection,
+                derived_run_id,
+                run_id=run_id,
+                lease_token=lease_token,
+                lease_owner=lease_owner,
+                lease_checked_at=lease_checked_at,
+                lease_clock=lease_clock,
             )
             connection.commit()
             return snapshot
@@ -1429,6 +1496,7 @@ class SQLiteAutomationRepository:
         lease_token: str | None = None,
         lease_owner: str | None = None,
         lease_checked_at: datetime | None = None,
+        lease_clock: Callable[[], datetime] | None = None,
     ) -> UserNotification:
         created = self._datetime(created_at or datetime.now(UTC), "created_at")
         deliver_at = (
@@ -1495,6 +1563,7 @@ class SQLiteAutomationRepository:
                 lease_token=lease_token,
                 lease_owner=lease_owner,
                 lease_checked_at=lease_checked_at,
+                lease_clock=lease_clock,
             )
             connection.execute(
                 """
@@ -1519,6 +1588,15 @@ class SQLiteAutomationRepository:
                     else None,
                     notification.created_at.isoformat(),
                 ),
+            )
+            self._validate_effect_lease(
+                connection,
+                derived_run_id,
+                run_id=run_id,
+                lease_token=lease_token,
+                lease_owner=lease_owner,
+                lease_checked_at=lease_checked_at,
+                lease_clock=lease_clock,
             )
             connection.commit()
             return notification
@@ -1676,6 +1754,21 @@ class SQLiteAutomationRepository:
     @classmethod
     def _datetime_text(cls, value: datetime, field_name: str) -> str:
         return cls._datetime(value, field_name).isoformat()
+
+    @classmethod
+    def _lease_time(
+        cls,
+        lease_clock: Callable[[], datetime] | None,
+        fallback: datetime | None,
+        field_name: str,
+    ) -> datetime:
+        """Read authoritative lease time while locked, with explicit-time compatibility."""
+
+        if lease_clock is not None:
+            return cls._datetime(lease_clock(), "lease_clock")
+        if fallback is None:
+            raise ValueError(f"{field_name} is required when lease_clock is not provided")
+        return cls._datetime(fallback, field_name)
 
     @staticmethod
     def _lease_expiry(started_at: datetime, lease_duration: timedelta) -> datetime:

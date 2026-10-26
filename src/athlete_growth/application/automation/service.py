@@ -160,6 +160,7 @@ class AutomaticTrainingLoop:
                     now=self._now(),
                     owner=self.owner,
                     lease_duration=self.lease_duration,
+                    lease_clock=self._now,
                 )
             except (KeyError, ValueError):
                 skipped_recoveries.add(expired.run_id)
@@ -172,6 +173,7 @@ class AutomaticTrainingLoop:
             lease_duration=self.lease_duration,
             limit=1,
             exclude=processed_subscriptions,
+            lease_clock=self._now,
         )
         if not claims:
             return None
@@ -244,6 +246,7 @@ class AutomaticTrainingLoop:
                 lease_token=run.lease_token,
                 owner=self.owner,
                 now=self._now(),
+                lease_clock=self._now,
             ) as connection,
         ):
             result = ingestion.ingest(
@@ -265,6 +268,7 @@ class AutomaticTrainingLoop:
                     created_at=self._now(),
                     lease_token=run.lease_token,
                     connection=connection,
+                    lease_clock=self._now,
                 )
                 if result.has_changes
                 else None
@@ -276,6 +280,7 @@ class AutomaticTrainingLoop:
                 run.run_id,
                 completed_at=self._now(),
                 lease_token=run.lease_token,
+                lease_clock=self._now,
             )
             return _RunOutcome(changed=False)
 
@@ -370,6 +375,7 @@ class AutomaticTrainingLoop:
                     lease_token=run.lease_token,
                     lease_owner=self.owner,
                     lease_checked_at=effect_at,
+                    lease_clock=self._now,
                 )
             ]
 
@@ -379,6 +385,7 @@ class AutomaticTrainingLoop:
             run.run_id,
             completed_at=self._now(),
             lease_token=run.lease_token,
+            lease_clock=self._now,
         )
         return _RunOutcome(
             changed=True,
@@ -431,6 +438,7 @@ class AutomaticTrainingLoop:
             lease_token=run.lease_token,
             lease_owner=self.owner,
             lease_checked_at=effect_at,
+            lease_clock=self._now,
         )
 
     @staticmethod
@@ -473,6 +481,7 @@ class AutomaticTrainingLoop:
                 error=f"{type(error).__name__}: automatic sync failed",
                 completed_at=self._now(),
                 lease_token=run.lease_token,
+                lease_clock=self._now,
             )
         except Exception:
             # A concurrent recovery may already own or have finished this run.
@@ -500,6 +509,7 @@ class AutomaticTrainingLoop:
             owner=self.owner,
             now=now,
             lease_duration=self.lease_duration,
+            lease_clock=self._now,
         )
 
     def _now(self) -> datetime:
