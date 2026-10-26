@@ -291,6 +291,40 @@ class MacOSLaunchdSchedulerTests(unittest.TestCase):
 
     @patch("athlete_growth.adapters.scheduler.macos.sys.platform", "darwin")
     @patch("athlete_growth.adapters.scheduler.macos.subprocess.run")
+    def test_update_failure_restores_unloaded_prior_without_reloading(self, run) -> None:
+        self.scheduler.plist_path.parent.mkdir(parents=True)
+        previous = plistlib.dumps({"Label": "previous", "Loaded": False})
+        self.scheduler.plist_path.write_bytes(previous)
+        os.chmod(self.scheduler.plist_path, 0o640)
+        run.side_effect = [
+            self._result(3, stderr="Boot-out failed: 3: No such process\n"),
+            self._result(5, stderr="Bootstrap failed: 5: Input/output error\n"),
+        ]
+
+        with self.assertRaisesRegex(RuntimeError, "launchctl bootstrap failed"):
+            self.scheduler.install()
+
+        self.assertEqual(self.scheduler.plist_path.read_bytes(), previous)
+        self.assertEqual(stat.S_IMODE(self.scheduler.plist_path.stat().st_mode), 0o640)
+        self.assertEqual(
+            [item.args[0] for item in run.call_args_list],
+            [
+                [
+                    "/bin/launchctl",
+                    "bootout",
+                    "gui/501/com.athlete-growth.automation",
+                ],
+                [
+                    "/bin/launchctl",
+                    "bootstrap",
+                    "gui/501",
+                    str(self.scheduler.plist_path),
+                ],
+            ],
+        )
+
+    @patch("athlete_growth.adapters.scheduler.macos.sys.platform", "darwin")
+    @patch("athlete_growth.adapters.scheduler.macos.subprocess.run")
     def test_install_rejects_symlinked_logs_without_external_mutation(self, run) -> None:
         external = self.root / "external-logs"
         external.mkdir(mode=0o750)

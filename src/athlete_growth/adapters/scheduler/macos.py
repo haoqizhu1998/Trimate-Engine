@@ -68,12 +68,16 @@ class MacOSLaunchdScheduler:
             self._open_private_log(log_file)
 
         previous = self._read_plist()
-        self._launchctl("bootout")
+        bootout = self._launchctl("bootout")
+        previous_was_loaded = bootout.returncode == 0
         try:
             self._write_plist_atomically(self._payload())
             self._launchctl("bootstrap")
         except BaseException as exc:
-            recovery_error = self._restore_after_failed_install(previous)
+            recovery_error = self._restore_after_failed_install(
+                previous,
+                reload_previous=previous_was_loaded,
+            )
             if recovery_error is not None:
                 raise RuntimeError(
                     f"{exc}; previous launch agent recovery failed"
@@ -107,7 +111,12 @@ class MacOSLaunchdScheduler:
         finally:
             os.close(descriptor)
 
-    def _restore_after_failed_install(self, previous: _SavedPlist | None) -> Exception | None:
+    def _restore_after_failed_install(
+        self,
+        previous: _SavedPlist | None,
+        *,
+        reload_previous: bool,
+    ) -> Exception | None:
         if previous is None:
             try:
                 self._unlink_plist()
@@ -118,6 +127,8 @@ class MacOSLaunchdScheduler:
             self._write_bytes_atomically(previous.content, previous.mode)
         except Exception as exc:
             return exc
+        if not reload_previous:
+            return None
         try:
             self._launchctl("bootstrap")
         except Exception as exc:
