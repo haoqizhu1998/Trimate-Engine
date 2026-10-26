@@ -39,6 +39,28 @@ class ReportServiceTests(unittest.TestCase):
             self.assertIn("daily check-in", report.data_gaps)
             self.assertIn("d" * 64, report.evidence_ids)
 
+    def test_daily_report_uses_athlete_timezone_boundaries(self) -> None:
+        local_midnight_in_utc = datetime(2026, 10, 25, 16, 0, tzinfo=UTC)
+
+        with TemporaryDirectory() as directory:
+            store = SQLiteRecordStore(Path(directory) / "athlete.sqlite3")
+            store.save(
+                CanonicalRecord.create(
+                    athlete_id="athlete-001",
+                    kind="daily-summary",
+                    occurred_at=local_midnight_in_utc,
+                    data={"calendar_date": "2026-10-26", "steps": 9000},
+                )
+            )
+            reports = service.ReportService(
+                "athlete-001", store, timezone_name="Asia/Shanghai"
+            )
+
+            report = reports.daily(date(2026, 10, 26))
+
+            self.assertEqual(report.objective["steps"], 9000)
+            self.assertNotIn("objective daily summary", report.data_gaps)
+
 
 if __name__ == "__main__":
     unittest.main()

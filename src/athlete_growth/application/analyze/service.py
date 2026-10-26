@@ -32,7 +32,13 @@ class TrainingAnalytics:
             else None
         )
         duration = sum(self._number(record.data.get("duration_min")) for record in acute)
-        high_minutes = sum(self._number(record.data.get("high_intensity_min")) for record in acute)
+        high_minutes = sum(
+            min(
+                self._number(record.data.get("high_intensity_min")),
+                self._number(record.data.get("duration_min")),
+            )
+            for record in acute
+        )
         drift_values = [
             (second - first) / first * 100
             for record in acute

@@ -73,6 +73,24 @@ class SQLiteRecordStoreTests(unittest.TestCase):
         leaked = [warning for warning in caught if "unclosed database" in str(warning.message)]
         self.assertEqual(leaked, [])
 
+    def test_retire_preserves_record_history_but_removes_it_from_current_results(self) -> None:
+        occurred_at = datetime(2026, 10, 26, 8, 0, tzinfo=UTC)
+        record = CanonicalRecord.create(
+            athlete_id="athlete-001",
+            kind="stress",
+            occurred_at=occurred_at,
+            data={"average_stress": 25},
+        )
+
+        with TemporaryDirectory() as directory:
+            store = sqlite_records.SQLiteRecordStore(Path(directory) / "athlete.sqlite3")
+            store.save(record)
+
+            store.retire(record.record_id)
+
+            self.assertEqual(store.list_current("athlete-001"), [])
+            self.assertEqual(store.get(record.record_id), record)
+
 
 if __name__ == "__main__":
     unittest.main()

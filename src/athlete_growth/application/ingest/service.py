@@ -19,6 +19,8 @@ from athlete_growth.ports.data_source import DataSourceConnector, SyncBatch, Syn
 @dataclass(frozen=True, slots=True)
 class IngestionResult:
     inserted: int
+    updated: int
+    retired: int
     duplicates: int
     raw_files: int
 
@@ -31,9 +33,17 @@ class IngestionService:
 
     def ingest(self, batch: SyncBatch) -> IngestionResult:
         inserted = 0
+        updated = 0
+        retired = 0
         duplicates = 0
         raw_files = 0
         sources: set[str] = set()
+        current_by_source: dict[tuple[str, str, str], list[CanonicalRecord]] = {}
+        for current in self.store.list_current(self.athlete_id):
+            for evidence in current.evidence:
+                current_by_source.setdefault(
+                    (evidence.source, current.kind, evidence.source_id), []
+                ).append(current)
         for raw in batch.records:
             sources.add(raw.source)
             payload_bytes = json.dumps(
@@ -48,12 +58,13 @@ class IngestionService:
                 with os.fdopen(descriptor, "wb") as handle:
                     handle.write(payload_bytes)
                 raw_files += 1
-            flags = self._quality_flags(raw.payload)
-            record = CanonicalRecord.create(
+            canonical_payload = raw.canonical_payload or raw.payload
+            flags = self._quality_flags(canonical_payload)
+            candidate = CanonicalRecord.create(
                 athlete_id=self.athlete_id,
                 kind=raw.kind,
                 occurred_at=raw.occurred_at,
-                data=raw.payload,
+                data=canonical_payload,
                 evidence=(
                     EvidenceRef(
                         source=raw.source,
@@ -64,7 +75,40 @@ class IngestionService:
                 ),
                 quality_flags=flags,
             )
-            if self.store.save(record):
+            source_key = (raw.source, raw.kind, raw.source_id)
+            existing_versions = current_by_source.get(source_key, [])
+            existing = next(
+                (
+                    record
+                    for record in existing_versions
+                    if self._equivalent(record, candidate)
+                ),
+                existing_versions[-1] if existing_versions else None,
+            )
+            for extra in existing_versions:
+                if extra is existing:
+                    continue
+                self.store.retire(extra.record_id)
+                retired += 1
+            if existing is not None and self._equivalent(existing, candidate):
+                current_by_source[source_key] = [existing]
+                duplicates += 1
+                continue
+            if existing is not None:
+                replacement = CanonicalRecord.create(
+                    athlete_id=self.athlete_id,
+                    kind=raw.kind,
+                    occurred_at=raw.occurred_at,
+                    data=canonical_payload,
+                    evidence=candidate.evidence,
+                    quality_flags=flags,
+                    supersedes_id=existing.record_id,
+                )
+                self.store.correct(existing.record_id, replacement)
+                current_by_source[source_key] = [replacement]
+                updated += 1
+            elif self.store.save(candidate):
+                current_by_source[source_key] = [candidate]
                 inserted += 1
             else:
                 duplicates += 1
@@ -76,7 +120,24 @@ class IngestionService:
                     batch.next_cursor,
                     datetime.now(UTC),
                 )
-        return IngestionResult(inserted, duplicates, raw_files)
+        return IngestionResult(inserted, updated, retired, duplicates, raw_files)
+
+    @staticmethod
+    def _equivalent(existing: CanonicalRecord, candidate: CanonicalRecord) -> bool:
+        def evidence_identity(record: CanonicalRecord) -> tuple[tuple[str, str, str | None], ...]:
+            return tuple(
+                (item.source, item.source_id, item.raw_hash) for item in record.evidence
+            )
+
+        return (
+            existing.athlete_id == candidate.athlete_id
+            and existing.kind == candidate.kind
+            and existing.occurred_at == candidate.occurred_at
+            and existing.data == candidate.data
+            and existing.quality_flags == candidate.quality_flags
+            and existing.schema_version == candidate.schema_version
+            and evidence_identity(existing) == evidence_identity(candidate)
+        )
 
     def sync(
         self,
@@ -100,16 +161,31 @@ class IngestionService:
 
     @staticmethod
     def _quality_flags(payload: Mapping[str, JsonValue]) -> tuple[str, ...]:
+        non_negative_metrics = {
+            "avg_hr",
+            "avg_speed_mps",
+            "body_battery",
+            "calories",
+            "distance_m",
+            "duration_min",
+            "elevation_gain_m",
+            "high_intensity_min",
+            "hrv",
+            "max_hr",
+            "resting_hr",
+            "sleep_hours",
+            "sleep_seconds",
+            "steps",
+            "training_load",
+            "weight_kg",
+        }
         flags: list[str] = []
         for key, value in payload.items():
             if (
+                key in non_negative_metrics
+                and
                 isinstance(value, (int, float))
                 and value < 0
-                and key
-                not in {
-                    "temperature_c",
-                    "elevation_m",
-                }
             ):
                 flags.append(f"negative:{key}")
         return tuple(flags)

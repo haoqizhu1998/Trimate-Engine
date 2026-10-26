@@ -132,8 +132,9 @@ class GarminCnConnector:
             source="garmin-cn",
             kind=str(row["kind"]),
             source_id=str(row["source_id"]),
-            occurred_at=occurred,
+            occurred_at=occurred.astimezone(UTC),
             payload=cast(dict[str, JsonValue], payload),
+            canonical_payload=_canonical_payload(str(row["kind"]), payload),
         )
 
 
@@ -278,3 +279,152 @@ def _parse_garmin_datetime(field: str, value: object) -> datetime:
     if occurred.tzinfo is None:
         return occurred.replace(tzinfo=UTC if field.endswith("GMT") else CN_TIMEZONE)
     return occurred
+
+
+def _canonical_payload(kind: str, payload: dict[str, object]) -> dict[str, JsonValue]:
+    if kind == "activity":
+        activity_type = payload.get("activityType")
+        sport = activity_type.get("typeKey") if isinstance(activity_type, dict) else None
+        duration_seconds = _number(payload.get("movingDuration"))
+        if duration_seconds is None:
+            duration_seconds = _number(payload.get("duration"))
+        return cast(
+            dict[str, JsonValue],
+            {
+                "name": _scalar(payload.get("activityName")),
+                "sport": _scalar(sport),
+                "duration_min": duration_seconds / 60 if duration_seconds is not None else None,
+                "distance_m": _number(payload.get("distance")),
+                "training_load": _number(payload.get("activityTrainingLoad")),
+                "high_intensity_min": _number(payload.get("vigorousIntensityMinutes")),
+                "avg_hr": _number(payload.get("averageHR")),
+                "max_hr": _number(payload.get("maxHR")),
+                "avg_speed_mps": _number(payload.get("averageSpeed")),
+                "elevation_gain_m": _number(payload.get("elevationGain")),
+                "calories": _number(payload.get("calories")),
+                "steps": _number(payload.get("steps")),
+                "device_id": _scalar(payload.get("deviceId")),
+            },
+        )
+    if kind == "daily-summary":
+        return cast(
+            dict[str, JsonValue],
+            {
+                "calendar_date": _scalar(payload.get("calendarDate")),
+                "steps": _number(payload.get("totalSteps")),
+                "resting_hr": _number(payload.get("restingHeartRate")),
+                "body_battery": _number(payload.get("bodyBatteryMostRecentValue")),
+                "average_stress": _number(payload.get("averageStressLevel")),
+                "sleep_seconds": _number(payload.get("sleepingSeconds")),
+            },
+        )
+    if kind == "sleep":
+        summary = _object(payload.get("dailySleepDTO")) or payload
+        return cast(
+            dict[str, JsonValue],
+            {
+                "calendar_date": _scalar(summary.get("calendarDate")),
+                "sleep_seconds": _first_number(
+                    summary, "sleepTimeSeconds", "sleepingSeconds", "totalSleepSeconds"
+                ),
+            },
+        )
+    if kind == "hrv":
+        summary = _object(payload.get("hrvSummary")) or payload
+        return cast(
+            dict[str, JsonValue],
+            {
+                "calendar_date": _scalar(summary.get("calendarDate")),
+                "hrv": _first_number(summary, "lastNightAvg", "weeklyAvg", "hrv"),
+            },
+        )
+    if kind == "heart-rate":
+        return cast(
+            dict[str, JsonValue],
+            {
+                "calendar_date": _scalar(payload.get("calendarDate")),
+                "resting_hr": _number(payload.get("restingHeartRate")),
+                "min_hr": _number(payload.get("minHeartRate")),
+                "max_hr": _number(payload.get("maxHeartRate")),
+            },
+        )
+    if kind == "stress":
+        return cast(
+            dict[str, JsonValue],
+            {
+                "calendar_date": _scalar(payload.get("calendarDate")),
+                "average_stress": _number(payload.get("averageStressLevel")),
+                "max_stress": _number(payload.get("maxStressLevel")),
+            },
+        )
+    if kind == "steps":
+        return cast(
+            dict[str, JsonValue],
+            {
+                "calendar_date": _scalar(payload.get("calendarDate")),
+                "steps": _number(payload.get("steps")),
+            },
+        )
+    if kind == "body-battery":
+        return cast(
+            dict[str, JsonValue],
+            {
+                "calendar_date": _scalar(payload.get("date")),
+                "body_battery": _latest_body_battery(payload),
+            },
+        )
+    if kind == "body-weight":
+        return cast(
+            dict[str, JsonValue],
+            {
+                "calendar_date": _scalar(
+                    payload.get("calendarDate") or payload.get("startDate")
+                ),
+                "weight_kg": _weight_kg(payload),
+            },
+        )
+    return cast(dict[str, JsonValue], payload)
+
+
+def _object(value: object) -> dict[str, object] | None:
+    return cast(dict[str, object], value) if isinstance(value, dict) else None
+
+
+def _scalar(value: object) -> str | int | float | bool | None:
+    return value if value is None or isinstance(value, (str, int, float, bool)) else None
+
+
+def _number(value: object) -> float | int | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return value
+
+
+def _first_number(payload: dict[str, object], *keys: str) -> float | int | None:
+    return next(
+        (number for key in keys if (number := _number(payload.get(key))) is not None),
+        None,
+    )
+
+
+def _latest_body_battery(payload: dict[str, object]) -> float | int | None:
+    direct = _number(payload.get("bodyBatteryMostRecentValue"))
+    if direct is not None:
+        return direct
+    values = payload.get("bodyBatteryValuesArray")
+    if not isinstance(values, list):
+        return None
+    for item in reversed(values):
+        if isinstance(item, list) and len(item) >= 2:
+            value = _number(item[1])
+            if value is not None:
+                return value
+    return None
+
+
+def _weight_kg(payload: dict[str, object]) -> float | int | None:
+    kilograms = _first_number(payload, "weight_kg", "weightKilograms")
+    if kilograms is not None:
+        return kilograms
+    grams = _first_number(payload, "weight", "totalAverage")
+    return grams / 1000 if grams is not None else None

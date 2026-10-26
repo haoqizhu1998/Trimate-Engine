@@ -77,6 +77,19 @@ class TrainingAnalyticsTests(unittest.TestCase):
         self.assertEqual(result.metrics["weight_kg_latest"], 70.2)
         self.assertNotIn("resting heart rate baseline", result.data_gaps)
 
+    def test_high_intensity_percentage_cannot_exceed_one_hundred(self) -> None:
+        as_of = datetime(2026, 10, 26, 12, 0, tzinfo=UTC)
+        activity = CanonicalRecord.create(
+            athlete_id="athlete-001",
+            kind="activity",
+            occurred_at=as_of - timedelta(hours=1),
+            data={"duration_min": 54.0, "high_intensity_min": 55.0},
+        )
+
+        result = service.TrainingAnalytics().analyze([activity], as_of=as_of)
+
+        self.assertEqual(result.metrics["high_intensity_pct"], 100.0)
+
 
 if __name__ == "__main__":
     unittest.main()

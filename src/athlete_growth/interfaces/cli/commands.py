@@ -14,7 +14,12 @@ from uuid import uuid4
 from athlete_growth.adapters.files import FileDataSource
 from athlete_growth.adapters.garmin_cn import GarminCnConnector
 from athlete_growth.adapters.races import RaceFileConnector
-from athlete_growth.adapters.storage import ProfileRegistry, SQLiteRecordStore, VaultLayout
+from athlete_growth.adapters.storage import (
+    ProfileRegistry,
+    SQLiteAthleteProfileRepository,
+    SQLiteRecordStore,
+    VaultLayout,
+)
 from athlete_growth.application.ai import ModelConsent, ModelRouter, RoutingPolicy
 from athlete_growth.application.check_in import CheckInService
 from athlete_growth.application.data_quality import inspect_records
@@ -38,6 +43,7 @@ from athlete_growth.ports.model_provider import ModelRequest
 class Runtime:
     home: Path
     athlete_id: str
+    timezone_name: str
     layout: VaultLayout
     store: SQLiteRecordStore
 
@@ -50,7 +56,16 @@ class Runtime:
         layout = VaultLayout(home, athlete_id)
         if not layout.database_file.is_file():
             raise RuntimeError("default profile database is missing")
-        return cls(home, athlete_id, layout, SQLiteRecordStore(layout.database_file))
+        profile = SQLiteAthleteProfileRepository(layout.database_file).get_by_id(athlete_id)
+        if profile is None:
+            raise RuntimeError("default profile record is missing")
+        return cls(
+            home,
+            athlete_id,
+            profile.timezone_name,
+            layout,
+            SQLiteRecordStore(layout.database_file),
+        )
 
 
 def execute(args) -> dict[str, object]:
@@ -114,9 +129,21 @@ def execute(args) -> dict[str, object]:
         )
         return {"record_id": record.record_id, "data": record.data}
     if args.command == "today":
-        return asdict(ReportService(runtime.athlete_id, runtime.store).daily(args.date))
+        return asdict(
+            ReportService(
+                runtime.athlete_id,
+                runtime.store,
+                timezone_name=runtime.timezone_name,
+            ).daily(args.date)
+        )
     if args.command == "weekly":
-        return asdict(ReportService(runtime.athlete_id, runtime.store).weekly(args.end_date))
+        return asdict(
+            ReportService(
+                runtime.athlete_id,
+                runtime.store,
+                timezone_name=runtime.timezone_name,
+            ).weekly(args.end_date)
+        )
     if args.command == "activity":
         records = runtime.store.list_current(runtime.athlete_id, kind="activity")
         return {"activities": [record_view(item) for item in records[-args.limit :]]}
@@ -171,7 +198,11 @@ def execute(args) -> dict[str, object]:
             args.max_weekly_minutes,
             (args.sport,),
         )
-        report = ReportService(runtime.athlete_id, runtime.store).daily(args.start_date)
+        report = ReportService(
+            runtime.athlete_id,
+            runtime.store,
+            timezone_name=runtime.timezone_name,
+        ).daily(args.start_date)
         plan = TrainingPlanner().generate(
             athlete_id=runtime.athlete_id,
             goal=goals[args.goal_id],

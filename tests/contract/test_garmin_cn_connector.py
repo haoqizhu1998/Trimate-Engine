@@ -111,6 +111,18 @@ class FakeGarminClient:
                 "activityId": 42,
                 "startTimeLocal": f"{startdate} 07:30:00",
                 "activityName": "Easy Run",
+                "activityType": {"typeKey": "running"},
+                "duration": 1800.0,
+                "distance": 5000.0,
+                "activityTrainingLoad": 72.5,
+                "vigorousIntensityMinutes": 20,
+                "averageHR": 145,
+                "maxHR": 168,
+                "averageSpeed": 2.78,
+                "elevationGain": 35.0,
+                "calories": 360.0,
+                "steps": 5200,
+                "deviceId": 12345,
             }
         ]
 
@@ -210,6 +222,67 @@ class GarminCnSessionGatewayTests(unittest.TestCase):
             activity = next(row for row in rows if row["kind"] == "activity")
             self.assertEqual(activity["source_id"], "42")
             self.assertEqual(activity["occurred_at"], "2026-10-26T07:30:00+08:00")
+
+    def test_connector_keeps_vendor_payload_but_exposes_canonical_activity_metrics(self) -> None:
+        with TemporaryDirectory() as directory:
+            gateway = connector.GarminCnSessionGateway(
+                token_dir=Path(directory) / "tokens" / "garmin-cn-session",
+                client_factory=FakeGarminClient,
+            )
+            source = connector.GarminCnConnector(home=Path(directory), gateway=gateway)
+
+            batch = source.sync(
+                SyncWindow(date(2026, 10, 26), date(2026, 10, 26)), None
+            )
+
+            activity = next(record for record in batch.records if record.kind == "activity")
+            self.assertEqual(activity.payload["activityName"], "Easy Run")
+            self.assertEqual(
+                activity.canonical_payload,
+                {
+                    "name": "Easy Run",
+                    "sport": "running",
+                    "duration_min": 30.0,
+                    "distance_m": 5000.0,
+                    "training_load": 72.5,
+                    "high_intensity_min": 20,
+                    "avg_hr": 145,
+                    "max_hr": 168,
+                    "avg_speed_mps": 2.78,
+                    "elevation_gain_m": 35.0,
+                    "calories": 360.0,
+                    "steps": 5200,
+                    "device_id": 12345,
+                },
+            )
+
+    def test_normalizes_nested_recovery_metrics(self) -> None:
+        sleep = connector.GarminCnConnector._to_raw(
+            {
+                "kind": "sleep",
+                "source_id": "2026-10-26:sleep:0",
+                "occurred_at": "2026-10-26T00:00:00+08:00",
+                "payload": {
+                    "dailySleepDTO": {
+                        "calendarDate": "2026-10-26",
+                        "sleepTimeSeconds": 28000,
+                    }
+                },
+            }
+        )
+        hrv = connector.GarminCnConnector._to_raw(
+            {
+                "kind": "hrv",
+                "source_id": "2026-10-26:hrv:0",
+                "occurred_at": "2026-10-26T00:00:00+08:00",
+                "payload": {
+                    "hrvSummary": {"calendarDate": "2026-10-26", "lastNightAvg": 61}
+                },
+            }
+        )
+
+        self.assertEqual(sleep.canonical_payload["sleep_seconds"], 28000)
+        self.assertEqual(hrv.canonical_payload["hrv"], 61)
 
 
 if __name__ == "__main__":

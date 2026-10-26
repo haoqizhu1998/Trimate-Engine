@@ -102,6 +102,17 @@ class SQLiteRecordStore:
                 self._serialize(replacement),
             )
 
+    def retire(self, record_id: str) -> None:
+        """Keep a record as history while removing it from current projections."""
+        with self._connection() as connection:
+            updated = connection.execute(
+                "UPDATE canonical_records SET is_current = 0 "
+                "WHERE record_id = ? AND is_current = 1",
+                (record_id,),
+            )
+            if updated.rowcount != 1:
+                raise KeyError(record_id)
+
     def get(self, record_id: str) -> CanonicalRecord | None:
         with self._connection() as connection:
             row = connection.execute(

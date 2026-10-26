@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
+from zoneinfo import ZoneInfo
 
 from athlete_growth.adapters.storage.sqlite_records import SQLiteRecordStore
 from athlete_growth.application.analyze.service import TrainingAnalytics
@@ -26,15 +27,22 @@ class WellnessReport:
 
 
 class ReportService:
-    def __init__(self, athlete_id: str, store: SQLiteRecordStore) -> None:
+    def __init__(
+        self, athlete_id: str, store: SQLiteRecordStore, *, timezone_name: str = "UTC"
+    ) -> None:
         self.athlete_id = athlete_id
         self.store = store
+        self.timezone = ZoneInfo(timezone_name)
         self.analytics = TrainingAnalytics()
         self.safety_rules = SafetyRules()
 
     def daily(self, calendar_date: date) -> WellnessReport:
-        start = datetime.combine(calendar_date, time.min, tzinfo=UTC)
-        end = start + timedelta(days=1) - timedelta(microseconds=1)
+        start = datetime.combine(calendar_date, time.min, tzinfo=self.timezone).astimezone(UTC)
+        end = (
+            datetime.combine(calendar_date + timedelta(days=1), time.min, tzinfo=self.timezone)
+            .astimezone(UTC)
+            - timedelta(microseconds=1)
+        )
         records = self.store.list_current(self.athlete_id, start=start, end=end)
         objective_records = [record for record in records if record.kind == "daily-summary"]
         check_ins = [record for record in records if record.kind == "check-in"]
@@ -75,8 +83,10 @@ class ReportService:
         )
 
     def weekly(self, end_date: date) -> WellnessReport:
-        end = datetime.combine(end_date + timedelta(days=1), time.min, tzinfo=UTC) - timedelta(
-            microseconds=1
+        end = (
+            datetime.combine(end_date + timedelta(days=1), time.min, tzinfo=self.timezone)
+            .astimezone(UTC)
+            - timedelta(microseconds=1)
         )
         start = end - timedelta(days=7) + timedelta(microseconds=1)
         records = self.store.list_current(self.athlete_id, start=start, end=end)
