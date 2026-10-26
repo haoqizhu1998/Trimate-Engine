@@ -375,6 +375,7 @@ class GarminCnSessionGatewayTests(unittest.TestCase):
             self.assertEqual(
                 activity.canonical_payload,
                 {
+                    "calendar_date": "2026-10-26",
                     "name": "Easy Run",
                     "sport": "running",
                     "duration_min": 30.0,

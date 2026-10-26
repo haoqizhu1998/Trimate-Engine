@@ -134,13 +134,17 @@ class GarminCnConnector:
         payload = row.get("payload")
         if not isinstance(payload, dict):
             raise ValueError("Garmin gateway payload must be an object")
+        kind = str(row["kind"])
+        canonical_payload = _canonical_payload(kind, payload)
+        if kind == "activity":
+            canonical_payload["calendar_date"] = occurred.date().isoformat()
         return RawSourceRecord(
             source="garmin-cn",
-            kind=str(row["kind"]),
+            kind=kind,
             source_id=str(row["source_id"]),
             occurred_at=occurred.astimezone(UTC),
             payload=cast(dict[str, JsonValue], payload),
-            canonical_payload=_canonical_payload(str(row["kind"]), payload),
+            canonical_payload=canonical_payload,
         )
 
 

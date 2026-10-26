@@ -190,6 +190,33 @@ class IngestionTests(unittest.TestCase):
 
         self.assertEqual(result.affected_dates, (date(2026, 10, 26),))
 
+    def test_garmin_early_morning_activity_uses_source_local_affected_date(self) -> None:
+        raw = GarminCnConnector._to_raw(
+            {
+                "kind": "activity",
+                "source_id": "run-42",
+                "occurred_at": "2026-10-26T07:30:00+08:00",
+                "payload": {
+                    "activityName": "Morning Run",
+                    "startTimeLocal": "2026-10-26 07:30:00",
+                    "duration": 1800.0,
+                },
+            }
+        )
+        self.assertEqual(raw.occurred_at, datetime(2026, 10, 25, 23, 30, tzinfo=UTC))
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            ingestion = service.IngestionService(
+                athlete_id="athlete-001",
+                store=SQLiteRecordStore(root / "athlete.sqlite3"),
+                raw_dir=root / "raw",
+            )
+
+            result = ingestion.ingest(data_source.SyncBatch((raw,)))
+
+        self.assertEqual(result.affected_dates, (date(2026, 10, 26),))
+
     def test_source_capabilities_validate_poll_interval(self) -> None:
         poll = data_source.SourceCapabilities(
             "garmin-cn",
