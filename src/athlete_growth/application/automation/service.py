@@ -58,13 +58,6 @@ class _RunOutcome:
     notifications: int = 0
 
 
-@dataclass(frozen=True, slots=True)
-class _SnapshotResult:
-    snapshot: AnalysisSnapshot
-    report: WellnessReport
-    affected_date: date | None
-
-
 class AutomaticTrainingLoop:
     """Claim bounded work, sync it, analyze real changes, and deliver due notices."""
 
@@ -244,36 +237,38 @@ class AutomaticTrainingLoop:
         batch = ingestion.fetch(connector, window)
         run = self._renew_owned(run)
         assert run.lease_token is not None
-        with TemporaryDirectory(prefix="athlete-growth-ingest-") as staging_directory:
-            with self.automation_repository.lease_fenced_transaction(
+        with (
+            TemporaryDirectory(prefix="athlete-growth-ingest-") as staging_directory,
+            self.automation_repository.lease_fenced_transaction(
                 run.run_id,
                 lease_token=run.lease_token,
                 owner=self.owner,
                 now=self._now(),
-            ) as connection:
-                result = ingestion.ingest(
-                    batch,
-                    connection=connection,
-                    raw_staging_dir=Path(staging_directory),
-                )
-                self.automation_repository.validate_lease(
+            ) as connection,
+        ):
+            result = ingestion.ingest(
+                batch,
+                connection=connection,
+                raw_staging_dir=Path(staging_directory),
+            )
+            self.automation_repository.validate_lease(
+                run.run_id,
+                lease_token=run.lease_token,
+                owner=self.owner,
+                now=self._now(),
+                connection=connection,
+            )
+            change_set = (
+                self.automation_repository.save_change_set(
                     run.run_id,
+                    result,
+                    created_at=self._now(),
                     lease_token=run.lease_token,
-                    owner=self.owner,
-                    now=self._now(),
                     connection=connection,
                 )
-                change_set = (
-                    self.automation_repository.save_change_set(
-                        run.run_id,
-                        result,
-                        created_at=self._now(),
-                        lease_token=run.lease_token,
-                        connection=connection,
-                    )
-                    if result.has_changes
-                    else None
-                )
+                if result.has_changes
+                else None
+            )
             ingestion.promote_raw_files(result)
         run = self._renew_owned(run)
         if not result.has_changes:
@@ -301,99 +296,43 @@ class AutomaticTrainingLoop:
         timezone_name: str,
     ) -> _RunOutcome:
         assert run.lease_token is not None
+        self._verify_raw_evidence(change_set)
         persisted_snapshots = self.automation_repository.list_snapshots_for_change_set(
             change_set.change_set_id
         )
-        if persisted_snapshots:
-            return self._complete_from_persisted_effects(
-                subscription,
-                run,
-                change_set,
-                persisted_snapshots,
-                timezone_name=timezone_name,
-            )
+        algorithm_version = "wellness-report/1.0"
+        persisted_by_identity = {
+            (snapshot.analysis_kind, snapshot.period, snapshot.algorithm_version): snapshot
+            for snapshot in persisted_snapshots
+        }
         report_service = ReportService(
             subscription.athlete_id,
             self.record_store,
             timezone_name=timezone_name,
         )
-        snapshot_results: list[_SnapshotResult] = []
+        snapshots: list[AnalysisSnapshot] = []
         for affected_date in change_set.affected_dates:
+            identity = ("daily", affected_date.isoformat(), algorithm_version)
+            persisted = persisted_by_identity.get(identity)
+            if persisted is not None:
+                snapshots.append(persisted)
+                continue
             report = report_service.daily(affected_date)
             run = self._renew_owned(run)
-            snapshot_results.append(
-                _SnapshotResult(
-                    self._save_report(change_set, report, analysis_kind="daily"),
-                    report,
-                    affected_date,
-                )
-            )
+            snapshots.append(self._save_report(run, change_set, report, analysis_kind="daily"))
         latest_date = change_set.affected_dates[-1]
-        weekly = report_service.weekly(latest_date)
-        run = self._renew_owned(run)
-        snapshot_results.append(
-            _SnapshotResult(
-                self._save_report(change_set, weekly, analysis_kind="weekly"),
-                weekly,
-                None,
-            )
+        weekly_identity = (
+            "weekly",
+            self._weekly_period(latest_date, timezone_name),
+            algorithm_version,
         )
-
-        notification_count = 0
-        if subscription.notification_mode is not NotificationMode.OFF:
-            selected = self._select_notification(snapshot_results)
-            notification_snapshot = selected.snapshot
-            notification_report = selected.report
-            risk_level = notification_report.safety.level.value
-            actionable = risk_level in {"moderate", "high"}
-            priority = "actionable" if actionable else "digest"
-            deliver_after = None
-            if (
-                subscription.notification_mode is NotificationMode.ACTIONABLE_DIGEST
-                and not actionable
-            ):
-                deliver_after = self._next_digest(
-                    change_set.created_at,
-                    timezone_name,
-                    subscription.digest_hour_local,
-                )
+        persisted_weekly = persisted_by_identity.get(weekly_identity)
+        if persisted_weekly is not None:
+            snapshots.append(persisted_weekly)
+        else:
+            weekly = report_service.weekly(latest_date)
             run = self._renew_owned(run)
-            self.automation_repository.enqueue_notification(
-                notification_snapshot,
-                priority=priority,
-                deliver_after=deliver_after,
-                title=f"Training data updated: {risk_level} risk",
-                body=self._notification_body(
-                    len(change_set.record_ids),
-                    risk_level,
-                    notification_report,
-                ),
-                created_at=self._now(),
-            )
-            notification_count = 1
-
-        run = self._renew_owned(run)
-        self.automation_repository.complete_sync_run(
-            run.run_id,
-            completed_at=self._now(),
-            lease_token=run.lease_token,
-        )
-        return _RunOutcome(
-            changed=True,
-            snapshots=len(snapshot_results),
-            notifications=notification_count,
-        )
-
-    def _complete_from_persisted_effects(
-        self,
-        subscription: SyncSubscription,
-        run: SyncRun,
-        change_set: DataChangeSet,
-        snapshots: list[AnalysisSnapshot],
-        *,
-        timezone_name: str,
-    ) -> _RunOutcome:
-        """Finish recovery from authoritative effects without re-running analysis."""
+            snapshots.append(self._save_report(run, change_set, weekly, analysis_kind="weekly"))
 
         notifications = self.automation_repository.list_notifications_for_change_set(
             change_set.change_set_id
@@ -413,6 +352,8 @@ class AutomaticTrainingLoop:
                     subscription.digest_hour_local,
                 )
             run = self._renew_owned(run)
+            assert run.lease_token is not None
+            effect_at = self._now()
             notifications = [
                 self.automation_repository.enqueue_notification(
                     selected,
@@ -424,7 +365,11 @@ class AutomaticTrainingLoop:
                         risk_level,
                         selected.report,
                     ),
-                    created_at=self._now(),
+                    created_at=effect_at,
+                    run_id=run.run_id,
+                    lease_token=run.lease_token,
+                    lease_owner=self.owner,
+                    lease_checked_at=effect_at,
                 )
             ]
 
@@ -439,19 +384,6 @@ class AutomaticTrainingLoop:
             changed=True,
             snapshots=len(snapshots),
             notifications=len(notifications),
-        )
-
-    @staticmethod
-    def _select_notification(results: list[_SnapshotResult]) -> _SnapshotResult:
-        risk_order = {"unknown": 0, "low": 1, "moderate": 2, "high": 3}
-        return max(
-            results,
-            key=lambda result: (
-                risk_order[result.report.safety.level.value],
-                result.affected_date is not None,
-                result.affected_date or date.min,
-                result.snapshot.snapshot_id,
-            ),
         )
 
     @staticmethod
@@ -480,19 +412,55 @@ class AutomaticTrainingLoop:
 
     def _save_report(
         self,
+        run: SyncRun,
         change_set: DataChangeSet,
         report: WellnessReport,
         *,
         analysis_kind: str,
     ) -> AnalysisSnapshot:
+        assert run.lease_token is not None
+        effect_at = self._now()
         return self.automation_repository.save_snapshot(
             change_set,
             cast(dict[str, JsonValue], self._json_value(asdict(report))),
             report.safety.level.value,
-            created_at=self._now(),
+            created_at=effect_at,
             analysis_kind=analysis_kind,
             algorithm_version=report.algorithm_version,
+            run_id=run.run_id,
+            lease_token=run.lease_token,
+            lease_owner=self.owner,
+            lease_checked_at=effect_at,
         )
+
+    @staticmethod
+    def _weekly_period(end_date: date, timezone_name: str) -> str:
+        timezone = ZoneInfo(timezone_name)
+        end = datetime.combine(end_date + timedelta(days=1), time.min, tzinfo=timezone).astimezone(
+            UTC
+        ) - timedelta(microseconds=1)
+        start = end - timedelta(days=7) + timedelta(microseconds=1)
+        return f"{start.date().isoformat()}/{end_date.isoformat()}"
+
+    def _verify_raw_evidence(self, change_set: DataChangeSet) -> None:
+        """Refuse analysis completion when a referenced immutable raw object is absent."""
+
+        for record_id in change_set.record_ids:
+            record = self.record_store.get(record_id)
+            if record is None:
+                raise ValueError("change set record is unavailable")
+            for evidence in record.evidence:
+                if evidence.raw_hash is None:
+                    continue
+                raw_file = (
+                    self.raw_root
+                    / change_set.athlete_id
+                    / evidence.source
+                    / evidence.raw_hash[:2]
+                    / f"{evidence.raw_hash}.json"
+                )
+                if not raw_file.is_file():
+                    raise ValueError("raw evidence is unavailable")
 
     def _fail_if_owned(self, run: SyncRun, error: Exception) -> None:
         if run.lease_token is None:
@@ -569,20 +537,6 @@ class AutomaticTrainingLoop:
         if candidate < local_now:
             candidate += timedelta(days=1)
         return candidate.astimezone(UTC)
-
-    @staticmethod
-    def _notification_body(
-        changed_records: int,
-        risk_level: str,
-        report: WellnessReport,
-    ) -> str:
-        if report.safety.actions:
-            next_step = report.safety.actions[0]
-        elif report.data_gaps:
-            next_step = f"Review data gap: {report.data_gaps[0]}."
-        else:
-            next_step = "Review the latest training analysis."
-        return f"{changed_records} record(s) changed. Risk: {risk_level}. {next_step}"
 
     @staticmethod
     def _persisted_notification_body(

@@ -743,6 +743,119 @@ class AutomaticTrainingLoopTests(unittest.TestCase):
         raw_root = self.root / "raw" / "athlete-001"
         self.assertFalse(raw_root.exists() and any(raw_root.rglob("*.json")))
 
+    def test_raw_promotion_failure_rolls_back_the_fenced_database_transaction(self) -> None:
+        self.add_profile()
+        self.add_subscription("watch")
+        connector = MutableConnector(
+            "watch",
+            (
+                _record(
+                    "watch",
+                    "check-in",
+                    "promotion-fails",
+                    occurred_at=datetime(2026, 10, 26, 8, 0, tzinfo=UTC),
+                    pain=0,
+                ),
+            ),
+            next_cursor="must-rollback",
+        )
+
+        with patch.object(
+            IngestionService,
+            "promote_raw_files",
+            side_effect=OSError("simulated raw promotion failure"),
+        ):
+            result = self.loop({"watch": connector}).run_once(limit=1)
+
+        run = self.automation.latest_sync_run("athlete-001", "watch")
+        assert run is not None
+        self.assertEqual((result.completed, result.failed), (0, 1))
+        self.assertEqual(run.status, "failed")
+        self.assertEqual(self.records.list_current("athlete-001"), [])
+        self.assertIsNone(self.records.get_cursor("athlete-001", "watch"))
+        self.assertEqual(self.table_count("data_change_sets"), 0)
+
+    def test_raw_evidence_is_promoted_before_the_database_commit(self) -> None:
+        self.add_profile()
+        self.add_subscription("watch")
+        connector = MutableConnector(
+            "watch",
+            (
+                _record(
+                    "watch",
+                    "check-in",
+                    "promotion-before-commit",
+                    occurred_at=datetime(2026, 10, 26, 8, 0, tzinfo=UTC),
+                    pain=0,
+                ),
+            ),
+        )
+        original_promote = IngestionService.promote_raw_files
+        committed_change_sets_seen: list[int] = []
+
+        def observe_promotion(ingestion_result) -> None:
+            with closing(sqlite3.connect(self.database_file)) as connection:
+                row = connection.execute("SELECT COUNT(*) FROM data_change_sets").fetchone()
+            assert row is not None
+            committed_change_sets_seen.append(int(row[0]))
+            original_promote(ingestion_result)
+            self.assertTrue(
+                all(destination.is_file() for _, destination in ingestion_result.staged_raw_files)
+            )
+
+        with patch.object(
+            IngestionService,
+            "promote_raw_files",
+            side_effect=observe_promotion,
+        ):
+            result = self.loop({"watch": connector}).run_once(limit=1)
+
+        self.assertEqual((result.completed, result.failed), (1, 0))
+        self.assertEqual(committed_change_sets_seen, [0])
+
+    def test_recovery_refuses_a_change_set_with_missing_raw_evidence(self) -> None:
+        self.add_profile()
+        self.add_subscription("watch")
+        connector = MutableConnector(
+            "watch",
+            (
+                _record(
+                    "watch",
+                    "check-in",
+                    "raw-removed-before-recovery",
+                    occurred_at=datetime(2026, 10, 26, 8, 0, tzinfo=UTC),
+                    pain=0,
+                ),
+            ),
+        )
+        loop = self.loop({"watch": connector})
+
+        with (
+            patch.object(
+                self.automation,
+                "save_snapshot",
+                side_effect=SystemExit("simulated crash after change set"),
+            ),
+            self.assertRaisesRegex(SystemExit, "after change set"),
+        ):
+            loop.run_once(limit=1)
+
+        crashed_run = self.automation.latest_sync_run("athlete-001", "watch")
+        assert crashed_run is not None
+        raw_files = list((self.root / "raw" / "athlete-001").rglob("*.json"))
+        self.assertTrue(raw_files)
+        for raw_file in raw_files:
+            raw_file.unlink()
+        self.clock.now += timedelta(minutes=6)
+
+        result = loop.run_once(limit=1)
+
+        recovered = self.automation.get_sync_run(crashed_run.run_id)
+        assert recovered is not None
+        self.assertEqual((result.recovered, result.completed, result.failed), (1, 0, 1))
+        self.assertEqual(recovered.status, "failed")
+        self.assertEqual(self.automation.list_snapshots("athlete-001"), [])
+
     def test_reclaim_during_fetch_prevents_stale_worker_mutation(self) -> None:
         self.add_profile()
         self.add_subscription("watch")
@@ -782,6 +895,93 @@ class AutomaticTrainingLoopTests(unittest.TestCase):
         self.assertEqual(self.records.list_current("athlete-001"), [])
         self.assertEqual(self.table_count("data_change_sets"), 0)
         self.assertFalse((self.root / "raw" / "athlete-001").exists())
+
+    def test_reclaim_immediately_before_snapshot_fences_the_stale_effect_write(self) -> None:
+        self.add_profile()
+        self.add_subscription("watch")
+        connector = MutableConnector(
+            "watch",
+            (
+                _record(
+                    "watch",
+                    "check-in",
+                    "snapshot-fence",
+                    occurred_at=datetime(2026, 10, 26, 8, 0, tzinfo=UTC),
+                    pain=0,
+                ),
+            ),
+        )
+        original_save = self.automation.save_snapshot
+
+        def reclaim_then_save(*args, **kwargs):
+            stale = self.automation.latest_sync_run("athlete-001", "watch")
+            assert stale is not None
+            self.clock.now += timedelta(minutes=6)
+            self.automation.reclaim_sync_run(
+                stale.run_id,
+                now=self.clock(),
+                owner="snapshot-takeover",
+                lease_duration=timedelta(minutes=5),
+            )
+            return original_save(*args, **kwargs)
+
+        with patch.object(
+            self.automation,
+            "save_snapshot",
+            side_effect=reclaim_then_save,
+        ):
+            result = self.loop({"watch": connector}).run_once(limit=1)
+
+        current = self.automation.latest_sync_run("athlete-001", "watch")
+        assert current is not None
+        self.assertEqual((result.completed, result.failed), (0, 1))
+        self.assertEqual((current.status, current.lease_owner), ("running", "snapshot-takeover"))
+        self.assertEqual(self.automation.list_snapshots("athlete-001"), [])
+
+    def test_reclaim_immediately_before_notification_fences_the_stale_effect_write(self) -> None:
+        self.add_profile()
+        self.add_subscription("watch")
+        connector = MutableConnector(
+            "watch",
+            (
+                _record(
+                    "watch",
+                    "check-in",
+                    "notification-fence",
+                    occurred_at=datetime(2026, 10, 26, 8, 0, tzinfo=UTC),
+                    pain=0,
+                ),
+            ),
+        )
+        original_enqueue = self.automation.enqueue_notification
+
+        def reclaim_then_enqueue(*args, **kwargs):
+            stale = self.automation.latest_sync_run("athlete-001", "watch")
+            assert stale is not None
+            self.clock.now += timedelta(minutes=6)
+            self.automation.reclaim_sync_run(
+                stale.run_id,
+                now=self.clock(),
+                owner="notification-takeover",
+                lease_duration=timedelta(minutes=5),
+            )
+            return original_enqueue(*args, **kwargs)
+
+        with patch.object(
+            self.automation,
+            "enqueue_notification",
+            side_effect=reclaim_then_enqueue,
+        ):
+            result = self.loop({"watch": connector}).run_once(limit=1)
+
+        current = self.automation.latest_sync_run("athlete-001", "watch")
+        assert current is not None
+        self.assertEqual((result.completed, result.failed), (0, 1))
+        self.assertEqual(
+            (current.status, current.lease_owner),
+            ("running", "notification-takeover"),
+        )
+        self.assertEqual(self.automation.list_unread("athlete-001"), [])
 
     def test_each_due_run_is_claimed_just_in_time(self) -> None:
         self.add_profile()
@@ -986,7 +1186,17 @@ class AutomaticTrainingLoopTests(unittest.TestCase):
                 _record(
                     "watch",
                     "check-in",
-                    "partial-low",
+                    "partial-low-older",
+                    occurred_at=datetime(2026, 10, 25, 8, 0, tzinfo=UTC),
+                    pain=0,
+                    fatigue=2,
+                    soreness=2,
+                    illness=False,
+                ),
+                _record(
+                    "watch",
+                    "check-in",
+                    "partial-low-newer",
                     occurred_at=datetime(2026, 10, 26, 8, 0, tzinfo=UTC),
                     pain=0,
                     fatigue=2,
@@ -1025,6 +1235,27 @@ class AutomaticTrainingLoopTests(unittest.TestCase):
         self.assertEqual(
             self.automation.list_notifications_for_change_set(change_set.change_set_id), []
         )
+        original_snapshot = original[0]
+        IngestionService(
+            athlete_id="athlete-001",
+            store=self.records,
+            raw_dir=self.root / "raw" / "athlete-001",
+        ).ingest(
+            SyncBatch(
+                (
+                    _record(
+                        "other-source",
+                        "check-in",
+                        "later-high-on-persisted-day",
+                        occurred_at=datetime(2026, 10, 25, 10, 0, tzinfo=UTC),
+                        pain=8,
+                        fatigue=2,
+                        soreness=2,
+                        illness=False,
+                    ),
+                )
+            )
+        )
         self.clock.now += timedelta(minutes=6)
 
         result = loop.run_once(limit=1)
@@ -1035,9 +1266,15 @@ class AutomaticTrainingLoopTests(unittest.TestCase):
         assert recovered is not None
         self.assertEqual((result.recovered, result.completed, result.failed), (1, 1, 0))
         self.assertEqual(recovered.status, "completed")
-        self.assertEqual(snapshots, original)
+        self.assertEqual(len(snapshots), 3)
+        self.assertIn(original_snapshot, snapshots)
+        self.assertEqual(
+            {item.period for item in snapshots if item.analysis_kind == "daily"},
+            {"2026-10-25", "2026-10-26"},
+        )
+        self.assertEqual(sum(item.analysis_kind == "weekly" for item in snapshots), 1)
         self.assertEqual(len(notifications), 1)
-        self.assertEqual(notifications[0].snapshot_id, original[0].snapshot_id)
+        self.assertIn(notifications[0].snapshot_id, {item.snapshot_id for item in snapshots})
 
     def test_recovery_reuses_snapshots_after_other_source_changes_same_day(self) -> None:
         self.add_profile()

@@ -1220,6 +1220,64 @@ class SQLiteAutomationRepository:
         )
         return change_set
 
+    def _validate_effect_lease(
+        self,
+        connection: sqlite3.Connection,
+        derived_run_id: str,
+        *,
+        run_id: str | None,
+        lease_token: str | None,
+        lease_owner: str | None,
+        lease_checked_at: datetime | None,
+    ) -> SyncRun:
+        row = connection.execute(
+            "SELECT * FROM automation_sync_runs WHERE run_id = ?",
+            (derived_run_id,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(derived_run_id)
+        run = self._sync_run_from_row(row)
+        if run.status != "running":
+            raise ValueError("sync run must be running to create an effect")
+        if run.lease_token is None:
+            if run_id is not None and run_id != derived_run_id:
+                raise ValueError("effect sync run conflict")
+            return run
+        if (
+            run_id != derived_run_id
+            or lease_token != run.lease_token
+            or lease_owner != run.lease_owner
+            or lease_checked_at is None
+        ):
+            raise ValueError("sync run lease conflict")
+        checked_at = self._datetime(lease_checked_at, "lease_checked_at")
+        if run.lease_expires_at is None or run.lease_expires_at <= checked_at:
+            raise ValueError("sync run lease has expired")
+        return run
+
+    def _run_id_for_change_set(
+        self,
+        connection: sqlite3.Connection,
+        change_set: DataChangeSet,
+    ) -> str:
+        row = connection.execute(
+            """
+            SELECT run_id, athlete_id, source
+            FROM data_change_sets
+            WHERE change_set_id = ?
+            """,
+            (change_set.change_set_id,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(change_set.change_set_id)
+        if (
+            row["run_id"] != change_set.run_id
+            or row["athlete_id"] != change_set.athlete_id
+            or row["source"] != change_set.source
+        ):
+            raise ValueError("change set identity conflict")
+        return cast(str, row["run_id"])
+
     def save_snapshot(
         self,
         change_set: DataChangeSet,
@@ -1229,6 +1287,10 @@ class SQLiteAutomationRepository:
         created_at: datetime,
         analysis_kind: str = "wellness",
         algorithm_version: str = "wellness-report/1.0",
+        run_id: str | None = None,
+        lease_token: str | None = None,
+        lease_owner: str | None = None,
+        lease_checked_at: datetime | None = None,
     ) -> AnalysisSnapshot:
         period = report_payload.get("period")
         if not isinstance(period, str) or not period.strip():
@@ -1252,10 +1314,44 @@ class SQLiteAutomationRepository:
             algorithm_version=algorithm_version,
         )
         report_json = snapshot.report_json
-        with self._connection() as connection:
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """
+                SELECT * FROM analysis_snapshots
+                WHERE change_set_id = ? AND period = ?
+                  AND analysis_kind = ? AND algorithm_version = ?
+                """,
+                (
+                    change_set.change_set_id,
+                    period,
+                    analysis_kind,
+                    algorithm_version,
+                ),
+            ).fetchone()
+            if row is not None:
+                existing = self._snapshot_from_row(row)
+                if (
+                    existing.athlete_id != snapshot.athlete_id
+                    or existing.risk_level != snapshot.risk_level
+                    or existing.report_json != report_json
+                ):
+                    raise ValueError("analysis snapshot idempotency conflict")
+                connection.commit()
+                return existing
+            derived_run_id = self._run_id_for_change_set(connection, change_set)
+            self._validate_effect_lease(
+                connection,
+                derived_run_id,
+                run_id=run_id,
+                lease_token=lease_token,
+                lease_owner=lease_owner,
+                lease_checked_at=lease_checked_at,
+            )
             connection.execute(
                 """
-                INSERT OR IGNORE INTO analysis_snapshots (
+                INSERT INTO analysis_snapshots (
                     snapshot_id, change_set_id, athlete_id, period,
                     analysis_kind, algorithm_version, report_json,
                     risk_level, created_at
@@ -1273,28 +1369,14 @@ class SQLiteAutomationRepository:
                     snapshot.created_at.isoformat(),
                 ),
             )
-            row = connection.execute(
-                """
-                SELECT * FROM analysis_snapshots
-                WHERE change_set_id = ? AND period = ?
-                  AND analysis_kind = ? AND algorithm_version = ?
-                """,
-                (
-                    change_set.change_set_id,
-                    period,
-                    analysis_kind,
-                    algorithm_version,
-                ),
-            ).fetchone()
-        assert row is not None
-        existing = self._snapshot_from_row(row)
-        if (
-            existing.athlete_id != snapshot.athlete_id
-            or existing.risk_level != snapshot.risk_level
-            or existing.report_json != report_json
-        ):
-            raise ValueError("analysis snapshot idempotency conflict")
-        return existing
+            connection.commit()
+            return snapshot
+        except BaseException:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        finally:
+            connection.close()
 
     def get_change_set_for_run(self, run_id: str) -> DataChangeSet | None:
         """Return the durable handoff for a sync run, if it has been published."""
@@ -1343,6 +1425,10 @@ class SQLiteAutomationRepository:
         created_at: datetime | None = None,
         policy_version: str = "notification-policy/1.0",
         channel: str = "inbox",
+        run_id: str | None = None,
+        lease_token: str | None = None,
+        lease_owner: str | None = None,
+        lease_checked_at: datetime | None = None,
     ) -> UserNotification:
         created = self._datetime(created_at or datetime.now(UTC), "created_at")
         deliver_at = (
@@ -1365,10 +1451,54 @@ class SQLiteAutomationRepository:
             policy_version=policy_version,
             channel=channel,
         )
-        with self._connection() as connection:
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """
+                SELECT * FROM notification_inbox
+                WHERE snapshot_id = ? AND policy_version = ? AND channel = ?
+                """,
+                (snapshot.snapshot_id, policy_version, channel),
+            ).fetchone()
+            if row is not None:
+                existing = self._notification_from_row(row)
+                if (
+                    existing.athlete_id != notification.athlete_id
+                    or existing.priority != notification.priority
+                    or existing.title != notification.title
+                    or existing.body != notification.body
+                    or existing.deliver_after != notification.deliver_after
+                ):
+                    raise ValueError("notification idempotency conflict")
+                connection.commit()
+                return existing
+            relation = connection.execute(
+                """
+                SELECT analysis_snapshots.athlete_id, data_change_sets.run_id
+                FROM analysis_snapshots
+                JOIN data_change_sets
+                  ON data_change_sets.change_set_id = analysis_snapshots.change_set_id
+                WHERE analysis_snapshots.snapshot_id = ?
+                """,
+                (snapshot.snapshot_id,),
+            ).fetchone()
+            if relation is None:
+                raise KeyError(snapshot.snapshot_id)
+            if relation["athlete_id"] != snapshot.athlete_id:
+                raise ValueError("analysis snapshot identity conflict")
+            derived_run_id = cast(str, relation["run_id"])
+            self._validate_effect_lease(
+                connection,
+                derived_run_id,
+                run_id=run_id,
+                lease_token=lease_token,
+                lease_owner=lease_owner,
+                lease_checked_at=lease_checked_at,
+            )
             connection.execute(
                 """
-                INSERT OR IGNORE INTO notification_inbox (
+                INSERT INTO notification_inbox (
                     notification_id, snapshot_id, athlete_id, policy_version,
                     channel, priority, title, body, deliver_after, created_at,
                     read_at, delivered_at,
@@ -1390,24 +1520,14 @@ class SQLiteAutomationRepository:
                     notification.created_at.isoformat(),
                 ),
             )
-            row = connection.execute(
-                """
-                SELECT * FROM notification_inbox
-                WHERE snapshot_id = ? AND policy_version = ? AND channel = ?
-                """,
-                (snapshot.snapshot_id, policy_version, channel),
-            ).fetchone()
-        assert row is not None
-        existing = self._notification_from_row(row)
-        if (
-            existing.athlete_id != notification.athlete_id
-            or existing.priority != notification.priority
-            or existing.title != notification.title
-            or existing.body != notification.body
-            or existing.deliver_after != notification.deliver_after
-        ):
-            raise ValueError("notification idempotency conflict")
-        return existing
+            connection.commit()
+            return notification
+        except BaseException:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        finally:
+            connection.close()
 
     def list_notifications(
         self,

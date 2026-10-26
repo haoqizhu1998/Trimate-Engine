@@ -177,11 +177,20 @@ class SQLiteAutomationRepositoryTests(unittest.TestCase):
                 report_payload,
                 "low",
                 created_at=self.now,
+                run_id=run.run_id,
+                lease_token=run.lease_token,
+                lease_owner=run.lease_owner,
+                lease_checked_at=self.now,
             )
             notification = repository.enqueue_notification(
                 snapshot,
                 priority="digest",
                 deliver_after=later,
+                created_at=self.now,
+                run_id=run.run_id,
+                lease_token=run.lease_token,
+                lease_owner=run.lease_owner,
+                lease_checked_at=self.now,
             )
 
             self.assertEqual(change_set.record_ids, ("record-001", "record-002"))
@@ -220,6 +229,10 @@ class SQLiteAutomationRepositoryTests(unittest.TestCase):
                 report_payload,
                 "low",
                 created_at=self.now,
+                run_id=run.run_id,
+                lease_token=run.lease_token,
+                lease_owner=run.lease_owner,
+                lease_checked_at=self.now,
             )
             replayed_snapshot = repository.save_snapshot(
                 replayed_change_set,
@@ -231,6 +244,11 @@ class SQLiteAutomationRepositoryTests(unittest.TestCase):
                 first_snapshot,
                 priority="digest",
                 deliver_after=None,
+                created_at=self.now,
+                run_id=run.run_id,
+                lease_token=run.lease_token,
+                lease_owner=run.lease_owner,
+                lease_checked_at=self.now,
             )
             replayed_notification = repository.enqueue_notification(
                 replayed_snapshot,
@@ -795,6 +813,110 @@ class SQLiteAutomationRepositoryTests(unittest.TestCase):
                     lease_token=claimed.lease_token,
                 )
 
+    def test_effect_writes_are_lease_fenced_and_exact_terminal_replays_are_allowed(self) -> None:
+        with TemporaryDirectory() as directory:
+            repository = SQLiteAutomationRepository(Path(directory) / "athlete.sqlite3")
+            repository.save_subscription(self.subscription, next_run_at=self.now)
+            claimed = repository.claim_due(
+                self.now,
+                owner="worker-old",
+                lease_duration=timedelta(minutes=5),
+            )[0][1]
+            assert claimed.lease_token is not None
+            change_set = repository.save_change_set(
+                claimed.run_id,
+                self.result,
+                created_at=self.now,
+                lease_token=claimed.lease_token,
+            )
+            reclaimed_at = self.now + timedelta(minutes=5)
+            reclaimed = repository.reclaim_sync_run(
+                claimed.run_id,
+                now=reclaimed_at,
+                owner="worker-new",
+                lease_duration=timedelta(minutes=10),
+            )
+            assert reclaimed.lease_token is not None
+            effect_at = reclaimed_at + timedelta(minutes=1)
+            report = {"period": "2026-10-26", "score": 80}
+
+            with self.assertRaisesRegex(ValueError, "lease"):
+                repository.save_snapshot(
+                    change_set,
+                    report,
+                    "low",
+                    created_at=effect_at,
+                    run_id=claimed.run_id,
+                    lease_token=claimed.lease_token,
+                    lease_owner=claimed.lease_owner,
+                    lease_checked_at=effect_at,
+                )
+            self.assertEqual(repository.list_snapshots("athlete-001"), [])
+            snapshot = repository.save_snapshot(
+                change_set,
+                report,
+                "low",
+                created_at=effect_at,
+                run_id=reclaimed.run_id,
+                lease_token=reclaimed.lease_token,
+                lease_owner=reclaimed.lease_owner,
+                lease_checked_at=effect_at,
+            )
+            with self.assertRaisesRegex(ValueError, "lease"):
+                repository.enqueue_notification(
+                    snapshot,
+                    priority="digest",
+                    deliver_after=None,
+                    created_at=effect_at,
+                    run_id=claimed.run_id,
+                    lease_token=claimed.lease_token,
+                    lease_owner=claimed.lease_owner,
+                    lease_checked_at=effect_at,
+                )
+            self.assertEqual(repository.list_unread("athlete-001"), [])
+            notification = repository.enqueue_notification(
+                snapshot,
+                priority="digest",
+                deliver_after=None,
+                created_at=effect_at,
+                run_id=reclaimed.run_id,
+                lease_token=reclaimed.lease_token,
+                lease_owner=reclaimed.lease_owner,
+                lease_checked_at=effect_at,
+            )
+            self.assertEqual(repository.get_sync_run(claimed.run_id), reclaimed)
+            repository.complete_sync_run(
+                reclaimed.run_id,
+                completed_at=effect_at + timedelta(minutes=1),
+                lease_token=reclaimed.lease_token,
+            )
+
+            self.assertEqual(
+                repository.save_snapshot(
+                    change_set,
+                    report,
+                    "low",
+                    created_at=effect_at + timedelta(minutes=2),
+                ),
+                snapshot,
+            )
+            self.assertEqual(
+                repository.enqueue_notification(
+                    snapshot,
+                    priority="digest",
+                    deliver_after=None,
+                    created_at=effect_at + timedelta(minutes=2),
+                ),
+                notification,
+            )
+            with self.assertRaisesRegex(ValueError, "conflict"):
+                repository.save_snapshot(
+                    change_set,
+                    {"period": "2026-10-26", "score": 99},
+                    "high",
+                    created_at=effect_at + timedelta(minutes=2),
+                )
+
     def test_exact_change_set_replay_survives_completion_but_divergence_conflicts(self) -> None:
         divergent_result = IngestionResult(
             inserted=1,
@@ -926,11 +1048,20 @@ class SQLiteAutomationRepositoryTests(unittest.TestCase):
                 {"period": "2026-10-26"},
                 "moderate",
                 created_at=self.now,
+                run_id=run.run_id,
+                lease_token=run.lease_token,
+                lease_owner=run.lease_owner,
+                lease_checked_at=self.now,
             )
             notification = repository.enqueue_notification(
                 snapshot,
                 priority="actionable",
                 deliver_after=None,
+                created_at=self.now,
+                run_id=run.run_id,
+                lease_token=run.lease_token,
+                lease_owner=run.lease_owner,
+                lease_checked_at=self.now,
             )
             failed = repository.mark_delivery_failed(
                 notification.notification_id,
