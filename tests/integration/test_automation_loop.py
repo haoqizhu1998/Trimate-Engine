@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 import sqlite3
 import unittest
 from collections.abc import Callable
@@ -187,6 +188,40 @@ class AutomaticTrainingLoopTests(unittest.TestCase):
             owner="integration-worker",
             lease_duration=timedelta(minutes=5),
         )
+
+    def crash_after_raw_change_set(
+        self,
+        source_id: str,
+    ) -> tuple[AutomaticTrainingLoop, str, Path]:
+        self.add_profile()
+        self.add_subscription("watch")
+        connector = MutableConnector(
+            "watch",
+            (
+                _record(
+                    "watch",
+                    "check-in",
+                    source_id,
+                    occurred_at=datetime(2026, 10, 26, 8, 0, tzinfo=UTC),
+                    pain=0,
+                ),
+            ),
+        )
+        loop = self.loop({"watch": connector})
+        with (
+            patch.object(
+                self.automation,
+                "save_snapshot",
+                side_effect=SystemExit("simulated crash after change set"),
+            ),
+            self.assertRaisesRegex(SystemExit, "after change set"),
+        ):
+            loop.run_once(limit=1)
+        crashed_run = self.automation.latest_sync_run("athlete-001", "watch")
+        assert crashed_run is not None
+        raw_files = list((self.root / "raw" / "athlete-001").rglob("*.json"))
+        self.assertEqual(len(raw_files), 1)
+        return loop, crashed_run.run_id, raw_files[0]
 
     def table_count(self, table: str) -> int:
         with closing(sqlite3.connect(self.database_file)) as connection:
@@ -1219,6 +1254,53 @@ class AutomaticTrainingLoopTests(unittest.TestCase):
         self.assertEqual((result.recovered, result.completed, result.failed), (1, 0, 1))
         self.assertEqual(recovered.status, "failed")
         self.assertEqual(self.automation.list_snapshots("athlete-001"), [])
+
+    def test_recovery_refuses_safe_raw_file_with_wrong_content(self) -> None:
+        loop, run_id, raw_file = self.crash_after_raw_change_set("tampered-in-vault")
+        raw_file.write_bytes(b"tampered")
+        self.clock.now += timedelta(minutes=6)
+
+        result = loop.run_once(limit=1)
+
+        recovered = self.automation.get_sync_run(run_id)
+        assert recovered is not None
+        self.assertEqual((result.recovered, result.completed, result.failed), (1, 0, 1))
+        self.assertEqual(recovered.status, "failed")
+        self.assertEqual(self.automation.list_snapshots("athlete-001"), [])
+
+    def test_recovery_refuses_symlinked_raw_source_escape(self) -> None:
+        loop, run_id, raw_file = self.crash_after_raw_change_set("symlinked-source")
+        athlete_raw_root = self.root / "raw" / "athlete-001"
+        source_root = athlete_raw_root / "watch"
+        relative_raw = raw_file.relative_to(source_root)
+        outside_source = self.root / "outside-source"
+        outside_file = outside_source / relative_raw
+        outside_file.parent.mkdir(parents=True)
+        outside_file.write_bytes(b"mismatched outside content")
+        shutil.rmtree(source_root)
+        source_root.symlink_to(outside_source, target_is_directory=True)
+        self.clock.now += timedelta(minutes=6)
+
+        result = loop.run_once(limit=1)
+
+        recovered = self.automation.get_sync_run(run_id)
+        assert recovered is not None
+        self.assertEqual((result.recovered, result.completed, result.failed), (1, 0, 1))
+        self.assertEqual(recovered.status, "failed")
+        self.assertEqual(self.automation.list_snapshots("athlete-001"), [])
+
+    def test_recovery_accepts_valid_content_addressed_raw_evidence(self) -> None:
+        loop, run_id, _ = self.crash_after_raw_change_set("valid-evidence")
+        self.clock.now += timedelta(minutes=6)
+
+        result = loop.run_once(limit=1)
+
+        recovered = self.automation.get_sync_run(run_id)
+        assert recovered is not None
+        self.assertEqual((result.recovered, result.completed, result.failed), (1, 1, 0))
+        self.assertEqual(recovered.status, "completed")
+        self.assertEqual(len(self.automation.list_snapshots("athlete-001")), 2)
+        self.assertEqual(len(self.automation.list_unread("athlete-001")), 1)
 
     def test_reclaim_during_fetch_prevents_stale_worker_mutation(self) -> None:
         self.add_profile()

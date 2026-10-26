@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import gc
+import hashlib
+import json
 import sqlite3
 import subprocess
 import sys
@@ -15,16 +17,19 @@ from threading import Barrier, Event
 from typing import Any, cast
 
 from athlete_growth.adapters.storage.sqlite_automation import SQLiteAutomationRepository
+from athlete_growth.adapters.storage.sqlite_profiles import SQLiteAthleteProfileRepository
 from athlete_growth.adapters.storage.sqlite_records import SQLiteRecordStore
 from athlete_growth.application.automation import (
     AnalysisSnapshot,
+    AutomaticTrainingLoop,
     NotificationMode,
     SyncSubscription,
     UserNotification,
 )
 from athlete_growth.application.ingest.service import IngestionResult
 from athlete_growth.application.report.service import ReportService
-from athlete_growth.domain.records import CanonicalRecord, JsonValue
+from athlete_growth.domain.athlete import AthleteProfile
+from athlete_growth.domain.records import CanonicalRecord, EvidenceRef, JsonValue
 
 
 def _seed_v1_database(database_file: Path, *, invalid_run: bool = False) -> None:
@@ -120,6 +125,38 @@ def _seed_v1_database(database_file: Path, *, invalid_run: bool = False) -> None
                 'Analysis ready', 'Open the product.', NULL,
                 '2026-10-26T12:01:00+00:00', NULL, NULL, 0, NULL
             );
+            """
+        )
+        connection.commit()
+
+
+def _upgrade_v1_seed_to_running_v3(database_file: Path) -> None:
+    with closing(sqlite3.connect(database_file)) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE automation_schema_version (
+                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                version INTEGER NOT NULL
+            );
+            INSERT INTO automation_schema_version VALUES (1, 3);
+            ALTER TABLE automation_sync_runs ADD COLUMN request_key TEXT;
+            ALTER TABLE automation_sync_runs ADD COLUMN lease_token TEXT;
+            ALTER TABLE automation_sync_runs ADD COLUMN lease_owner TEXT;
+            ALTER TABLE automation_sync_runs ADD COLUMN lease_expires_at TEXT;
+            ALTER TABLE automation_sync_runs ADD COLUMN updated_at TEXT;
+            ALTER TABLE analysis_snapshots ADD COLUMN analysis_kind TEXT NOT NULL DEFAULT 'daily';
+            ALTER TABLE analysis_snapshots ADD COLUMN algorithm_version TEXT NOT NULL
+                DEFAULT 'wellness-report/1.0';
+            ALTER TABLE notification_inbox ADD COLUMN policy_version TEXT NOT NULL
+                DEFAULT 'notification-policy/1.0';
+            ALTER TABLE notification_inbox ADD COLUMN channel TEXT NOT NULL DEFAULT 'inbox';
+            UPDATE automation_sync_runs
+            SET status = 'running', completed_at = NULL,
+                request_key = 'legacy-v3-slot', lease_token = 'legacy-v3-token',
+                lease_owner = 'legacy-worker',
+                lease_expires_at = '2026-10-26T12:05:00+00:00',
+                updated_at = '2026-10-26T12:01:00+00:00'
+            WHERE run_id = 'run-v1';
             """
         )
         connection.commit()
@@ -647,6 +684,124 @@ class SQLiteAutomationRepositoryTests(unittest.TestCase):
                 tuple(sorted(record.record_id for record in current)),
             )
             self.assertEqual(recovered_report.analytics.metrics["sessions_7d"], 2)
+
+    def test_running_v3_migration_regenerates_effects_from_one_current_projection(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            database_file = root / "athlete.sqlite3"
+            raw_root = root / "raw"
+            records = SQLiteRecordStore(database_file)
+            current: list[CanonicalRecord] = []
+            evidence_hashes: set[str] = set()
+            for index, load in enumerate((10, 20), start=1):
+                payload = {"training_load": load, "duration_min": 30}
+                payload_bytes = json.dumps(
+                    payload,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode()
+                digest = hashlib.sha256(payload_bytes).hexdigest()
+                evidence_hashes.add(digest)
+                raw_file = raw_root / "athlete-001" / "garmin-cn" / digest[:2] / f"{digest}.json"
+                raw_file.parent.mkdir(parents=True, exist_ok=True)
+                raw_file.write_bytes(payload_bytes)
+                record = CanonicalRecord.create(
+                    athlete_id="athlete-001",
+                    kind="activity",
+                    occurred_at=datetime(2026, 10, 26, 8 + index, 0, tzinfo=UTC),
+                    data=payload,
+                    evidence=(
+                        EvidenceRef(
+                            "garmin-cn",
+                            f"activity-{index}",
+                            datetime(2026, 10, 26, 12, 11, tzinfo=UTC),
+                            digest,
+                        ),
+                    ),
+                    created_at=datetime(2026, 10, 26, 12, 11, tzinfo=UTC),
+                )
+                records.save(record)
+                current.append(record)
+            _seed_v1_database(database_file)
+            with closing(sqlite3.connect(database_file)) as connection:
+                connection.execute(
+                    "UPDATE data_change_sets SET record_ids_json = ? WHERE change_set_id = ?",
+                    (json.dumps([current[0].record_id]), "change-v1"),
+                )
+                connection.commit()
+            _upgrade_v1_seed_to_running_v3(database_file)
+
+            repository = SQLiteAutomationRepository(database_file)
+            migrated = repository.get_change_set_for_run("run-v1")
+            assert migrated is not None
+            self.assertNotEqual(migrated.change_set_id, "change-v1")
+            self.assertEqual(
+                migrated.projection_record_ids,
+                tuple(sorted(record.record_id for record in current)),
+            )
+            self.assertEqual(repository.list_snapshots_for_change_set(migrated.change_set_id), [])
+            self.assertEqual(
+                repository.list_notifications_for_change_set(migrated.change_set_id),
+                [],
+            )
+            with closing(sqlite3.connect(database_file)) as connection:
+                self.assertEqual(
+                    connection.execute(
+                        "SELECT COUNT(*) FROM analysis_snapshots_automation_v3_backup"
+                    ).fetchone()[0],
+                    1,
+                )
+                self.assertEqual(
+                    connection.execute(
+                        "SELECT COUNT(*) FROM notification_inbox_automation_v3_backup"
+                    ).fetchone()[0],
+                    1,
+                )
+
+            now = datetime(2026, 10, 26, 12, 20, tzinfo=UTC)
+            profiles = SQLiteAthleteProfileRepository(database_file)
+            profiles.save(
+                AthleteProfile(
+                    athlete_id="athlete-001",
+                    display_name="Migration Athlete",
+                    timezone_name="Asia/Shanghai",
+                    unit_system="metric",
+                    created_at=now,
+                )
+            )
+            loop = AutomaticTrainingLoop(
+                automation_repository=repository,
+                record_store=records,
+                profile_repository=profiles,
+                connectors={},
+                raw_root=raw_root,
+                clock=lambda: now,
+                owner="migration-recovery-worker",
+                lease_duration=timedelta(minutes=5),
+            )
+
+            result = loop.run_once(limit=1)
+
+            recovered = repository.get_sync_run("run-v1")
+            assert recovered is not None
+            snapshots = repository.list_snapshots_for_change_set(migrated.change_set_id)
+            notifications = repository.list_notifications_for_change_set(migrated.change_set_id)
+            self.assertEqual((result.recovered, result.completed, result.failed), (1, 1, 0))
+            self.assertEqual(recovered.status, "completed")
+            self.assertEqual(
+                {snapshot.analysis_kind for snapshot in snapshots},
+                {"daily", "weekly"},
+            )
+            self.assertEqual(len(snapshots), 2)
+            self.assertTrue(
+                all(
+                    set(snapshot.report["evidence_ids"]) == evidence_hashes
+                    for snapshot in snapshots
+                )
+            )
+            self.assertEqual(len(notifications), 1)
 
     def test_invalid_v1_run_aborts_migration_without_partial_schema(self) -> None:
         with TemporaryDirectory() as directory:

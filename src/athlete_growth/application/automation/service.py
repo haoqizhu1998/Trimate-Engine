@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import os
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import asdict, dataclass, is_dataclass
@@ -23,7 +25,7 @@ from athlete_growth.application.automation.models import (
 )
 from athlete_growth.application.ingest.service import IngestionService
 from athlete_growth.application.report.service import ReportService, WellnessReport
-from athlete_growth.domain.identifiers import require_strict_child
+from athlete_growth.domain.identifiers import require_safe_component, require_strict_child
 from athlete_growth.domain.records import JsonValue
 from athlete_growth.ports.data_source import DataSourceConnector, SyncWindow
 from athlete_growth.ports.notification import NoopNotificationSink, NotificationSink
@@ -510,29 +512,97 @@ class AutomaticTrainingLoop:
         return f"{start_date.isoformat()}/{end_date.isoformat()}"
 
     def _verify_raw_evidence(self, change_set: DataChangeSet) -> None:
-        """Refuse analysis completion when a referenced immutable raw object is absent."""
+        """Cryptographically verify every raw object in the immutable projection."""
 
         if LEGACY_PROJECTION_UNAVAILABLE in change_set.projection_record_ids:
             raise ValueError("legacy analysis projection is unavailable; sync must be restarted")
+        athlete_raw_root = require_strict_child(
+            self.raw_root,
+            self.raw_root / change_set.athlete_id,
+            "athlete raw root",
+        )
         referenced_record_ids = tuple(
             dict.fromkeys(change_set.record_ids + change_set.projection_record_ids)
         )
         for record_id in referenced_record_ids:
             record = self.record_store.get(record_id)
-            if record is None:
-                raise ValueError("change set record is unavailable")
+            if record is None or record.athlete_id != change_set.athlete_id or not record.evidence:
+                raise ValueError("raw evidence could not be verified")
             for evidence in record.evidence:
-                if evidence.raw_hash is None:
-                    continue
-                raw_file = (
-                    self.raw_root
-                    / change_set.athlete_id
-                    / evidence.source
-                    / evidence.raw_hash[:2]
-                    / f"{evidence.raw_hash}.json"
+                try:
+                    require_safe_component(evidence.source, "evidence source")
+                    if evidence.raw_hash is None:
+                        raise ValueError("raw evidence hash is unavailable")
+                    raw_file = (
+                        athlete_raw_root
+                        / evidence.source
+                        / evidence.raw_hash[:2]
+                        / f"{evidence.raw_hash}.json"
+                    )
+                    require_strict_child(athlete_raw_root, raw_file, "raw evidence")
+                    actual_hash = self._sha256_raw_file(
+                        athlete_raw_root,
+                        evidence.source,
+                        evidence.raw_hash,
+                    )
+                except (OSError, ValueError):
+                    raise ValueError("raw evidence could not be verified") from None
+                if actual_hash != evidence.raw_hash:
+                    raise ValueError("raw evidence could not be verified")
+
+    @staticmethod
+    def _sha256_raw_file(raw_root: Path, source: str, expected_hash: str) -> str:
+        """Hash an evidence object without following vault-internal symlinks."""
+
+        if (
+            os.open in os.supports_dir_fd
+            and hasattr(os, "O_DIRECTORY")
+            and hasattr(os, "O_NOFOLLOW")
+        ):
+            directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+            file_flags = os.O_RDONLY | os.O_NOFOLLOW
+            descriptors: list[int] = []
+            try:
+                root_descriptor = os.open(raw_root, directory_flags)
+                descriptors.append(root_descriptor)
+                source_descriptor = os.open(source, directory_flags, dir_fd=root_descriptor)
+                descriptors.append(source_descriptor)
+                shard_descriptor = os.open(
+                    expected_hash[:2],
+                    directory_flags,
+                    dir_fd=source_descriptor,
                 )
-                if not raw_file.is_file():
-                    raise ValueError("raw evidence is unavailable")
+                descriptors.append(shard_descriptor)
+                file_descriptor = os.open(
+                    f"{expected_hash}.json",
+                    file_flags,
+                    dir_fd=shard_descriptor,
+                )
+                descriptors.append(file_descriptor)
+                return AutomaticTrainingLoop._sha256_descriptor(file_descriptor)
+            finally:
+                for descriptor in reversed(descriptors):
+                    with suppress(OSError):
+                        os.close(descriptor)
+
+        candidate = raw_root / source / expected_hash[:2] / f"{expected_hash}.json"
+        for path in (candidate.parent.parent, candidate.parent, candidate):
+            if path.is_symlink():
+                raise ValueError("raw evidence could not be verified")
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(candidate, flags)
+        try:
+            return AutomaticTrainingLoop._sha256_descriptor(descriptor)
+        finally:
+            os.close(descriptor)
+
+    @staticmethod
+    def _sha256_descriptor(descriptor: int) -> str:
+        digest = hashlib.sha256()
+        with os.fdopen(os.dup(descriptor), "rb") as handle:
+            while chunk := handle.read(1024 * 1024):
+                digest.update(chunk)
+        return digest.hexdigest()
 
     def _fail_if_owned(self, run: SyncRun, error: Exception) -> None:
         if run.lease_token is None:

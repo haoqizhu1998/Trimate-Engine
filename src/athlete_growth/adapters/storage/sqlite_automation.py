@@ -323,6 +323,7 @@ class SQLiteAutomationRepository:
             cls._normalize_legacy_run(row, source_columns["automation_sync_runs"])
             for row in source_rows["automation_sync_runs"]
         ]
+        runs_by_id = {run.run_id: run for run in normalized_runs}
 
         backup_tables = {
             table: f"{table}_automation_v{source_version}_backup" for table in ordered_tables
@@ -342,7 +343,38 @@ class SQLiteAutomationRepository:
         for run in normalized_runs:
             cls._insert_sync_run(connection, run)
         change_set_columns = source_columns["data_change_sets"]
+        superseded_change_set_ids: set[str] = set()
         for row in source_rows["data_change_sets"]:
+            run = runs_by_id[row["run_id"]]
+            projection_record_ids = (
+                tuple(json.loads(row["projection_record_ids_json"]))
+                if "projection_record_ids_json" in change_set_columns
+                else cls._reconstruct_legacy_projection(
+                    connection,
+                    tables,
+                    athlete_id=row["athlete_id"],
+                )
+            )
+            change_set_id = row["change_set_id"]
+            created_at = row["created_at"]
+            if run.status == "running":
+                projection_record_ids = cls._reconstruct_legacy_projection(
+                    connection,
+                    tables,
+                    athlete_id=row["athlete_id"],
+                )
+                change_set_id = cls._identifier(
+                    "migration-recovery-change-set",
+                    row["run_id"],
+                    json.dumps(projection_record_ids, separators=(",", ":")),
+                )
+                created_at = cls._migration_recovery_created_at(
+                    connection,
+                    tables,
+                    athlete_id=row["athlete_id"],
+                    fallback=row["created_at"],
+                )
+                superseded_change_set_ids.add(row["change_set_id"])
             connection.execute(
                 """
                 INSERT INTO data_change_sets (
@@ -351,27 +383,22 @@ class SQLiteAutomationRepository:
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    row["change_set_id"],
+                    change_set_id,
                     row["run_id"],
                     row["athlete_id"],
                     row["source"],
                     row["record_ids_json"],
                     row["affected_dates_json"],
-                    row["projection_record_ids_json"]
-                    if "projection_record_ids_json" in change_set_columns
-                    else json.dumps(
-                        cls._reconstruct_legacy_projection(
-                            connection,
-                            tables,
-                            athlete_id=row["athlete_id"],
-                        ),
-                        ensure_ascii=False,
-                    ),
-                    row["created_at"],
+                    json.dumps(projection_record_ids, ensure_ascii=False),
+                    created_at,
                 ),
             )
         analysis_columns = source_columns["analysis_snapshots"]
+        skipped_snapshot_ids: set[str] = set()
         for row in source_rows["analysis_snapshots"]:
+            if row["change_set_id"] in superseded_change_set_ids:
+                skipped_snapshot_ids.add(row["snapshot_id"])
+                continue
             connection.execute(
                 """
                 INSERT INTO analysis_snapshots (
@@ -396,6 +423,8 @@ class SQLiteAutomationRepository:
 
         notification_columns = source_columns["notification_inbox"]
         for row in source_rows["notification_inbox"]:
+            if row["snapshot_id"] in skipped_snapshot_ids:
+                continue
             connection.execute(
                 """
                 INSERT INTO notification_inbox (
@@ -474,6 +503,36 @@ class SQLiteAutomationRepository:
             (athlete_id,),
         ).fetchall()
         return tuple(row["record_id"] for row in rows)
+
+    @classmethod
+    def _migration_recovery_created_at(
+        cls,
+        connection: sqlite3.Connection,
+        tables: set[str],
+        *,
+        athlete_id: str,
+        fallback: str,
+    ) -> str:
+        """Use a deterministic watermark time for a reconstructed current projection."""
+
+        fallback_at = cls._datetime(datetime.fromisoformat(fallback), "created_at")
+        if "canonical_records" not in tables:
+            return fallback_at.isoformat()
+        columns = cls._table_columns(connection, "canonical_records")
+        if not {"athlete_id", "is_current", "created_at"} <= columns:
+            return fallback_at.isoformat()
+        rows = connection.execute(
+            """
+            SELECT created_at FROM canonical_records
+            WHERE athlete_id = ? AND is_current = 1
+            """,
+            (athlete_id,),
+        ).fetchall()
+        candidates = [fallback_at]
+        candidates.extend(
+            cls._datetime(datetime.fromisoformat(row["created_at"]), "created_at") for row in rows
+        )
+        return max(candidates).isoformat()
 
     @classmethod
     def _normalize_legacy_run(
