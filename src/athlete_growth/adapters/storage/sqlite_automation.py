@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
-from athlete_growth.application.automation import (
+from athlete_growth.application.automation.models import (
     AnalysisSnapshot,
     DataChangeSet,
     NotificationMode,
@@ -1163,6 +1163,16 @@ class SQLiteAutomationRepository:
         ):
             raise ValueError("analysis snapshot idempotency conflict")
         return existing
+
+    def get_change_set_for_run(self, run_id: str) -> DataChangeSet | None:
+        """Return the durable handoff for a sync run, if it has been published."""
+
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM data_change_sets WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+        return self._change_set_from_row(row) if row is not None else None
 
     def list_snapshots(self, athlete_id: str) -> list[AnalysisSnapshot]:
         with self._connection() as connection:
