@@ -96,6 +96,8 @@ class GarminCnConnector:
             ),
             read_only=True,
             supports_write=False,
+            delivery_mode="poll",
+            suggested_poll_minutes=30,
         )
 
     def authenticate(

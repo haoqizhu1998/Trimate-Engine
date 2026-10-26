@@ -67,6 +67,63 @@ class IngestionTests(unittest.TestCase):
             self.assertEqual((second.inserted, second.duplicates), (0, 3))
             self.assertEqual(store.get_cursor("athlete-001", "garmin-cn"), "2026-03-01")
 
+    def test_chunked_sync_unions_and_sorts_change_metadata(self) -> None:
+        class MetadataIngestionService(service.IngestionService):
+            def __init__(self) -> None:
+                self.results = iter(
+                    (
+                        service.IngestionResult(
+                            1,
+                            0,
+                            0,
+                            0,
+                            1,
+                            changed_record_ids=("record-b", "record-a"),
+                            affected_dates=(date(2026, 1, 2), date(2026, 1, 1)),
+                        ),
+                        service.IngestionResult(
+                            0,
+                            1,
+                            1,
+                            0,
+                            1,
+                            changed_record_ids=("record-c", "record-a"),
+                            affected_dates=(date(2026, 1, 3), date(2026, 1, 1)),
+                        ),
+                    )
+                )
+
+            def sync(
+                self,
+                connector: data_source.DataSourceConnector,
+                window: data_source.SyncWindow,
+                *,
+                max_attempts: int = 3,
+            ) -> service.IngestionResult:
+                return next(self.results)
+
+        ingestion = MetadataIngestionService()
+
+        result = ingestion.sync_chunked(
+            object(),  # type: ignore[arg-type]
+            data_source.SyncWindow(date(2026, 1, 1), date(2026, 1, 2)),
+            chunk_days=1,
+        )
+
+        self.assertEqual(
+            (result.inserted, result.updated, result.retired, result.raw_files),
+            (1, 1, 1, 2),
+        )
+        self.assertEqual(
+            result.changed_record_ids,
+            ("record-a", "record-b", "record-c"),
+        )
+        self.assertEqual(
+            result.affected_dates,
+            (date(2026, 1, 1), date(2026, 1, 2), date(2026, 1, 3)),
+        )
+        self.assertTrue(result.has_changes)
+
     def test_ingests_idempotently_and_preserves_raw_evidence(self) -> None:
         ingestion_type = getattr(service, "IngestionService", None)
         raw_type = getattr(data_source, "RawSourceRecord", None)
@@ -99,9 +156,42 @@ class IngestionTests(unittest.TestCase):
             self.assertEqual((first.inserted, first.duplicates), (1, 0))
             self.assertEqual((second.inserted, second.duplicates), (0, 1))
             stored = store.list_current("athlete-001", kind="activity")[0]
+            self.assertEqual(first.changed_record_ids, (stored.record_id,))
+            self.assertEqual(first.affected_dates, (date(2026, 10, 26),))
+            self.assertTrue(first.has_changes)
+            self.assertEqual(second.changed_record_ids, ())
+            self.assertEqual(second.affected_dates, ())
+            self.assertFalse(second.has_changes)
             self.assertEqual(stored.evidence[0].source_id, "run-1")
             self.assertTrue(any((root / "raw").rglob("*.json")))
             self.assertEqual(store.get_cursor("athlete-001", "file"), "cursor-1")
+
+    def test_source_capabilities_validate_poll_interval(self) -> None:
+        poll = data_source.SourceCapabilities(
+            "garmin-cn",
+            "cn",
+            ("daily-summary",),
+            delivery_mode="poll",
+            suggested_poll_minutes=30,
+        )
+
+        self.assertEqual(poll.suggested_poll_minutes, 30)
+        with self.assertRaisesRegex(ValueError, "positive"):
+            data_source.SourceCapabilities(
+                "garmin-cn",
+                "cn",
+                ("daily-summary",),
+                delivery_mode="poll",
+                suggested_poll_minutes=0,
+            )
+        with self.assertRaisesRegex(ValueError, "only poll sources"):
+            data_source.SourceCapabilities(
+                "file",
+                None,
+                ("activity",),
+                delivery_mode="manual",
+                suggested_poll_minutes=30,
+            )
 
     def test_stores_raw_vendor_payload_and_uses_separate_canonical_payload(self) -> None:
         occurred_at = datetime(2026, 10, 26, 8, 0, tzinfo=UTC)
@@ -166,6 +256,9 @@ class IngestionTests(unittest.TestCase):
             self.assertEqual(repeated.updated, 0)
             self.assertEqual(repeated.duplicates, 1)
             self.assertEqual(len(current), 1)
+            self.assertEqual(replacement.changed_record_ids, (current[0].record_id,))
+            self.assertEqual(replacement.affected_dates, (date(2026, 10, 26),))
+            self.assertTrue(replacement.has_changes)
             self.assertEqual(current[0].data["duration_min"], 30.0)
             self.assertIsNotNone(current[0].supersedes_id)
 
@@ -281,12 +374,18 @@ class IngestionTests(unittest.TestCase):
                 athlete_id="athlete-001", store=store, raw_dir=root / "raw"
             )
             ingestion.ingest(data_source.SyncBatch((legacy,)))
+            legacy_id = store.list_current("athlete-001", kind="steps")[0].record_id
 
             result = ingestion.ingest(data_source.SyncBatch((daily,)))
 
             current = store.list_current("athlete-001", kind="steps")
             self.assertEqual(result.retired, 1)
             self.assertEqual(len(current), 1)
+            self.assertEqual(
+                result.changed_record_ids,
+                tuple(sorted((legacy_id, current[0].record_id))),
+            )
+            self.assertEqual(result.affected_dates, (date(2026, 10, 26),))
             self.assertEqual(current[0].data["steps"], 9000)
 
     def test_weight_snapshot_retires_legacy_range_envelope(self) -> None:

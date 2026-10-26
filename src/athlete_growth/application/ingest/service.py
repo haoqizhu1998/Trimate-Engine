@@ -7,7 +7,7 @@ import json
 import os
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from time import sleep
 
@@ -28,6 +28,12 @@ class IngestionResult:
     retired: int
     duplicates: int
     raw_files: int
+    changed_record_ids: tuple[str, ...] = ()
+    affected_dates: tuple[date, ...] = ()
+
+    @property
+    def has_changes(self) -> bool:
+        return self.inserted > 0 or self.updated > 0 or self.retired > 0
 
 
 class IngestionService:
@@ -43,6 +49,8 @@ class IngestionService:
         duplicates = 0
         raw_files = 0
         sources: set[str] = set()
+        changed_record_ids: set[str] = set()
+        affected_dates: set[date] = set()
         current_by_source: dict[tuple[str, str, str], list[CanonicalRecord]] = {}
         for current in self.store.list_current(self.athlete_id):
             for evidence in current.evidence:
@@ -81,11 +89,15 @@ class IngestionService:
                 quality_flags=flags,
             )
             source_key = (raw.source, raw.kind, raw.source_id)
-            retired += self._retire_legacy_daily_duplicates(
+            retired_records = self._retire_legacy_daily_duplicates(
                 raw,
                 canonical_payload,
                 current_by_source,
             )
+            retired += len(retired_records)
+            for record in retired_records:
+                changed_record_ids.add(record.record_id)
+                affected_dates.add(record.occurred_at.date())
             existing_versions = current_by_source.get(source_key, [])
             existing = next(
                 (
@@ -100,6 +112,8 @@ class IngestionService:
                     continue
                 self.store.retire(extra.record_id)
                 retired += 1
+                changed_record_ids.add(extra.record_id)
+                affected_dates.add(extra.occurred_at.date())
             if existing is not None and self._equivalent(existing, candidate):
                 current_by_source[source_key] = [existing]
                 duplicates += 1
@@ -117,9 +131,14 @@ class IngestionService:
                 self.store.correct(existing.record_id, replacement)
                 current_by_source[source_key] = [replacement]
                 updated += 1
+                changed_record_ids.add(replacement.record_id)
+                affected_dates.add(existing.occurred_at.date())
+                affected_dates.add(replacement.occurred_at.date())
             elif self.store.save(candidate):
                 current_by_source[source_key] = [candidate]
                 inserted += 1
+                changed_record_ids.add(candidate.record_id)
+                affected_dates.add(candidate.occurred_at.date())
             else:
                 duplicates += 1
         if batch.next_cursor is not None:
@@ -130,14 +149,22 @@ class IngestionService:
                     batch.next_cursor,
                     datetime.now(UTC),
                 )
-        return IngestionResult(inserted, updated, retired, duplicates, raw_files)
+        return IngestionResult(
+            inserted,
+            updated,
+            retired,
+            duplicates,
+            raw_files,
+            changed_record_ids=tuple(sorted(changed_record_ids)),
+            affected_dates=tuple(sorted(affected_dates)),
+        )
 
     def _retire_legacy_daily_duplicates(
         self,
         raw: RawSourceRecord,
         canonical_payload: Mapping[str, JsonValue],
         current_by_source: dict[tuple[str, str, str], list[CanonicalRecord]],
-    ) -> int:
+    ) -> tuple[CanonicalRecord, ...]:
         """Replace legacy per-day fragments once a canonical daily row arrives."""
         if raw.kind == "body-weight" and ":body-weight:" not in raw.source_id:
             return self._retire_matching_source_ids(
@@ -152,7 +179,7 @@ class IngestionService:
             or not isinstance(calendar_date, str)
             or raw.source_id != calendar_date
         ):
-            return 0
+            return ()
         legacy_prefix = f"{calendar_date}:{raw.kind}:"
         return self._retire_matching_source_ids(
             raw,
@@ -165,16 +192,16 @@ class IngestionService:
         raw: RawSourceRecord,
         current_by_source: dict[tuple[str, str, str], list[CanonicalRecord]],
         matches: Callable[[str], bool],
-    ) -> int:
-        retired = 0
+    ) -> tuple[CanonicalRecord, ...]:
+        retired: list[CanonicalRecord] = []
         for source_key in list(current_by_source):
             source, kind, source_id = source_key
             if source != raw.source or kind != raw.kind or not matches(source_id):
                 continue
             for record in current_by_source.pop(source_key):
                 self.store.retire(record.record_id)
-                retired += 1
-        return retired
+                retired.append(record)
+        return tuple(retired)
 
     @staticmethod
     def _equivalent(existing: CanonicalRecord, candidate: CanonicalRecord) -> bool:
@@ -224,6 +251,8 @@ class IngestionService:
         if chunk_days < 1:
             raise ValueError("chunk_days must be at least 1")
         totals = [0, 0, 0, 0, 0]
+        changed_record_ids: set[str] = set()
+        affected_dates: set[date] = set()
         chunk_start = window.start
         while chunk_start <= window.end:
             chunk_end = min(
@@ -241,8 +270,14 @@ class IngestionService:
                 )
             ):
                 totals[index] += value
+            changed_record_ids.update(result.changed_record_ids)
+            affected_dates.update(result.affected_dates)
             chunk_start = chunk_end + timedelta(days=1)
-        return IngestionResult(*totals)
+        return IngestionResult(
+            *totals,
+            changed_record_ids=tuple(sorted(changed_record_ids)),
+            affected_dates=tuple(sorted(affected_dates)),
+        )
 
     @staticmethod
     def _quality_flags(payload: Mapping[str, JsonValue]) -> tuple[str, ...]:

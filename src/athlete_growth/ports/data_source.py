@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Protocol
+from typing import Literal, Protocol
 
 from athlete_growth.domain.records import JsonValue
 
@@ -16,6 +16,19 @@ class SourceCapabilities:
     kinds: tuple[str, ...]
     read_only: bool = True
     supports_write: bool = False
+    delivery_mode: Literal["push", "poll", "manual"] = "manual"
+    suggested_poll_minutes: int | None = None
+
+    def __post_init__(self) -> None:
+        if (
+            self.suggested_poll_minutes is not None
+            and self.suggested_poll_minutes <= 0
+        ):
+            raise ValueError("suggested_poll_minutes must be positive")
+        if self.suggested_poll_minutes is not None and self.delivery_mode != "poll":
+            raise ValueError(
+                "only poll sources may declare suggested_poll_minutes"
+            )
 
 
 @dataclass(frozen=True, slots=True)

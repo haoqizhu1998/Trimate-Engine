@@ -35,6 +35,17 @@ class FakeGarminGateway:
 
 
 class GarminCnConnectorContractTests(unittest.TestCase):
+    def test_declares_poll_delivery_capabilities(self) -> None:
+        with TemporaryDirectory() as directory:
+            source = connector.GarminCnConnector(
+                home=Path(directory), gateway=FakeGarminGateway()
+            )
+
+            capabilities = source.capabilities()
+
+            self.assertEqual(capabilities.delivery_mode, "poll")
+            self.assertEqual(capabilities.suggested_poll_minutes, 30)
+
     def test_is_read_only_and_keeps_cn_session_region_isolated(self) -> None:
         connector_type = getattr(connector, "GarminCnConnector", None)
         self.assertIsNotNone(connector_type)
