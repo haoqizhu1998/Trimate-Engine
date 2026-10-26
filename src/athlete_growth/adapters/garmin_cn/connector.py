@@ -137,7 +137,15 @@ class GarminCnConnector:
         kind = str(row["kind"])
         canonical_payload = _canonical_payload(kind, payload)
         if kind == "activity":
-            canonical_payload["calendar_date"] = occurred.date().isoformat()
+            calendar_date = row.get("calendar_date")
+            if isinstance(calendar_date, str):
+                try:
+                    activity_date = date.fromisoformat(calendar_date)
+                except ValueError:
+                    activity_date = occurred.date()
+            else:
+                activity_date = occurred.date()
+            canonical_payload["calendar_date"] = activity_date.isoformat()
         return RawSourceRecord(
             source="garmin-cn",
             kind=kind,
@@ -293,12 +301,22 @@ class GarminCnSessionGateway:
             ("calendarDate", fallback_date.isoformat()),
         )
         occurred = _parse_garmin_datetime(date_key, date_value)
-        return {
+        row: dict[str, object] = {
             "kind": kind,
             "source_id": str(source_id),
             "occurred_at": occurred.isoformat(),
             "payload": item,
         }
+        if kind == "activity":
+            activity_date = occurred.date()
+            start_time_local = item.get("startTimeLocal")
+            if isinstance(start_time_local, str):
+                with suppress(ValueError):
+                    activity_date = _parse_garmin_datetime(
+                        "startTimeLocal", start_time_local
+                    ).date()
+            row["calendar_date"] = activity_date.isoformat()
+        return row
 
 
 def _parse_garmin_datetime(field: str, value: object) -> datetime:

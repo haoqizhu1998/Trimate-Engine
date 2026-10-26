@@ -5,7 +5,10 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from athlete_growth.adapters.garmin_cn.connector import GarminCnConnector
+from athlete_growth.adapters.garmin_cn.connector import (
+    GarminCnConnector,
+    GarminCnSessionGateway,
+)
 from athlete_growth.adapters.storage import SQLiteRecordStore
 from athlete_growth.application.ingest import service
 from athlete_growth.ports import data_source
@@ -191,18 +194,19 @@ class IngestionTests(unittest.TestCase):
         self.assertEqual(result.affected_dates, (date(2026, 10, 26),))
 
     def test_garmin_early_morning_activity_uses_source_local_affected_date(self) -> None:
-        raw = GarminCnConnector._to_raw(
+        row = GarminCnSessionGateway._row(
+            "activity",
             {
-                "kind": "activity",
-                "source_id": "run-42",
-                "occurred_at": "2026-10-26T07:30:00+08:00",
-                "payload": {
-                    "activityName": "Morning Run",
-                    "startTimeLocal": "2026-10-26 07:30:00",
-                    "duration": 1800.0,
-                },
-            }
+                "activityId": 42,
+                "activityName": "Morning Run",
+                "startTimeGMT": "2026-10-25 23:30:00",
+                "startTimeLocal": "2026-10-26 07:30:00",
+                "duration": 1800.0,
+            },
+            date(2026, 10, 26),
+            0,
         )
+        raw = GarminCnConnector._to_raw(row)
         self.assertEqual(raw.occurred_at, datetime(2026, 10, 25, 23, 30, tzinfo=UTC))
 
         with TemporaryDirectory() as directory:
