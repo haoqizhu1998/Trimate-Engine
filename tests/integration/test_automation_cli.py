@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import subprocess
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stderr, redirect_stdout
@@ -15,6 +16,7 @@ from unittest.mock import patch
 from athlete_growth.adapters.storage import (
     ProfileRegistry,
     SQLiteAutomationRepository,
+    SQLiteRecordStore,
     VaultLayout,
 )
 from athlete_growth.application.automation import NotificationMode
@@ -22,6 +24,7 @@ from athlete_growth.interfaces.cli import main as cli_main
 from athlete_growth.interfaces.host import tools as host_tools
 from athlete_growth.ports.data_source import (
     HealthStatus,
+    RawSourceRecord,
     SourceCapabilities,
     SyncBatch,
     SyncWindow,
@@ -70,6 +73,27 @@ class FailingGarminConnector(EmptyGarminConnector):
     def sync(self, window: SyncWindow, cursor: str | None) -> SyncBatch:
         del window, cursor
         raise ConnectionError("vendor included a secret in the original error")
+
+
+class ChangedGarminConnector(EmptyGarminConnector):
+    def sync(self, window: SyncWindow, cursor: str | None) -> SyncBatch:
+        del window, cursor
+        return SyncBatch(
+            (
+                RawSourceRecord(
+                    source="garmin-cn",
+                    kind="activity",
+                    source_id="automatic-run",
+                    occurred_at=datetime(2026, 10, 26, 8, 0, tzinfo=UTC),
+                    payload={
+                        "activity_type": "running",
+                        "duration_seconds": 1800,
+                        "distance_meters": 5000,
+                    },
+                ),
+            ),
+            None,
+        )
 
 
 class AutomationHostAndCLITests(unittest.TestCase):
@@ -315,6 +339,55 @@ class AutomationHostAndCLITests(unittest.TestCase):
     )
     @patch(
         "athlete_growth.interfaces.host.tools.GarminCnConnector",
+        ChangedGarminConnector,
+    )
+    def test_run_once_uses_profile_raw_directory_for_import_and_connector_evidence(
+        self,
+        _sink,
+    ) -> None:
+        imported_file = Path(self.temporary_directory.name) / "manual-import.csv"
+        imported_file.write_text(
+            "kind,source_id,occurred_at,activity_type,duration_seconds,distance_meters\n"
+            "activity,manual-run,2026-10-25T08:00:00+08:00,running,1200,3000\n",
+            encoding="utf-8",
+        )
+        with redirect_stdout(StringIO()):
+            code = cli_main.main(["import-file", str(imported_file), "--data-home", str(self.home)])
+        self.assertEqual(code, 0)
+        host_tools.configure_automation(
+            self.home,
+            notification_mode=NotificationMode.ALL,
+            now=self.now,
+        )
+
+        summary = host_tools.run_automation_once(self.home, clock=lambda: self.now)
+
+        self.assertEqual(
+            (summary["completed"], summary["failed"], summary["snapshots"]),
+            (1, 0, 2),
+        )
+        self.assertEqual(summary["notifications"], 1)
+        store = SQLiteRecordStore(self.layout.database_file)
+        records = store.list_current(self.athlete_id, kind="activity")
+        self.assertEqual({record.evidence[0].source for record in records}, {"file", "garmin-cn"})
+        for record in records:
+            evidence = record.evidence[0]
+            assert evidence.raw_hash is not None
+            self.assertTrue(
+                (
+                    self.layout.raw
+                    / evidence.source
+                    / evidence.raw_hash[:2]
+                    / f"{evidence.raw_hash}.json"
+                ).is_file()
+            )
+
+    @patch(
+        "athlete_growth.interfaces.host.tools.default_notification_sink",
+        return_value=NoopNotificationSink(),
+    )
+    @patch(
+        "athlete_growth.interfaces.host.tools.GarminCnConnector",
         BlockingGarminConnector,
     )
     def test_overlapping_force_runs_do_not_duplicate_work(self, _sink) -> None:
@@ -487,6 +560,12 @@ class AutomationHostAndCLITests(unittest.TestCase):
     @patch("athlete_growth.adapters.scheduler.macos.sys.platform", "darwin")
     @patch("athlete_growth.adapters.scheduler.macos.subprocess.run")
     def test_uninstall_accepts_missing_data_home_and_profile(self, run) -> None:
+        run.return_value = subprocess.CompletedProcess(
+            [],
+            3,
+            stdout="",
+            stderr="Boot-out failed: 3: No such process\n",
+        )
         missing_home = Path(self.temporary_directory.name) / "never-initialized"
         fake_user_home = Path(self.temporary_directory.name) / "fake-user"
         with patch(

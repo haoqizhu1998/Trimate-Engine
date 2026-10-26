@@ -190,6 +190,12 @@ def run_automation_once(
         profile_repository=runtime.profiles,
         connectors={DEFAULT_SOURCE: GarminCnConnector(home=runtime.home)},
         raw_root=runtime.layout.raw,
+        raw_directory_for_athlete=lambda athlete_id: (
+            VaultLayout(
+                runtime.home,
+                athlete_id,
+            ).raw
+        ),
         notification_sink=default_notification_sink(),
         clock=active_clock,
         owner="automation-host",

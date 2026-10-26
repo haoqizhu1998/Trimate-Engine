@@ -74,6 +74,7 @@ class AutomaticTrainingLoop:
         profile_repository: AthleteProfileRepository,
         connectors: Mapping[str, DataSourceConnector],
         raw_root: Path,
+        raw_directory_for_athlete: Callable[[str], Path] | None = None,
         notification_sink: NotificationSink | None = None,
         clock: Callable[[], datetime] | None = None,
         owner: str = "automatic-training-loop",
@@ -90,6 +91,7 @@ class AutomaticTrainingLoop:
         self.profile_repository = profile_repository
         self.connectors = dict(connectors)
         self.raw_root = raw_root
+        self.raw_directory_for_athlete = raw_directory_for_athlete
         self.notification_sink = notification_sink or NoopNotificationSink()
         self.clock = clock or (lambda: datetime.now(UTC))
         self.owner = owner
@@ -297,11 +299,7 @@ class AutomaticTrainingLoop:
             local_today - timedelta(days=subscription.lookback_days - 1),
             local_today,
         )
-        athlete_raw_root = require_strict_child(
-            self.raw_root,
-            self.raw_root / subscription.athlete_id,
-            "athlete raw root",
-        )
+        athlete_raw_root = self._raw_directory(subscription.athlete_id)
         ingestion = IngestionService(
             athlete_id=subscription.athlete_id,
             store=self.record_store,
@@ -536,11 +534,7 @@ class AutomaticTrainingLoop:
 
         if LEGACY_PROJECTION_UNAVAILABLE in change_set.projection_record_ids:
             raise ValueError("legacy analysis projection is unavailable; sync must be restarted")
-        athlete_raw_root = require_strict_child(
-            self.raw_root,
-            self.raw_root / change_set.athlete_id,
-            "athlete raw root",
-        )
+        athlete_raw_root = self._raw_directory(change_set.athlete_id)
         referenced_record_ids = tuple(
             dict.fromkeys(change_set.record_ids + change_set.projection_record_ids)
         )
@@ -620,6 +614,18 @@ class AutomaticTrainingLoop:
             return AutomaticTrainingLoop._sha256_descriptor(descriptor)
         finally:
             os.close(descriptor)
+
+    def _raw_directory(self, athlete_id: str) -> Path:
+        if self.raw_directory_for_athlete is not None:
+            raw_directory = self.raw_directory_for_athlete(athlete_id)
+            if not isinstance(raw_directory, Path):
+                raise TypeError("raw directory resolver must return a Path")
+            return raw_directory
+        return require_strict_child(
+            self.raw_root,
+            self.raw_root / athlete_id,
+            "athlete raw root",
+        )
 
     @staticmethod
     def _sha256_descriptor(descriptor: int) -> str:
