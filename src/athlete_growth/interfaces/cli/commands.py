@@ -35,6 +35,7 @@ from athlete_growth.domain.nutrition import FuelingContext, NutritionProfile
 from athlete_growth.domain.records import CanonicalRecord, JsonValue
 from athlete_growth.domain.recovery import InjuryStatus
 from athlete_growth.domain.training import TrainingConstraints
+from athlete_growth.interfaces.host import tools as host_tools
 from athlete_growth.ports.data_source import SyncWindow
 from athlete_growth.ports.model_provider import ModelRequest
 
@@ -76,6 +77,28 @@ def execute(args) -> dict[str, object]:
         )
         ProfileRegistry(restored.home / "config.toml").register(restored.athlete_id)
         return {"athlete_id": restored.athlete_id, "profile_root": str(restored.profile_root)}
+    if args.command == "automation-configure":
+        return host_tools.automation_configure(
+            home,
+            source=args.source,
+            interval_minutes=args.interval_minutes,
+            lookback_days=args.lookback_days,
+            notification_mode=args.notification_mode,
+            digest_hour_local=args.digest_hour,
+            enabled=not args.disable,
+        )
+    if args.command == "automation-status":
+        return host_tools.automation_status(home)
+    if args.command == "automation-run-once":
+        return host_tools.automation_run_once(home, force=args.force)
+    if args.command == "automation-install-macos":
+        return host_tools.automation_install_macos(home)
+    if args.command == "automation-uninstall-macos":
+        return host_tools.automation_uninstall_macos(home)
+    if args.command == "notification-list":
+        return host_tools.notification_list(home, include_read=args.include_read)
+    if args.command == "notification-read":
+        return host_tools.notification_read(home, args.notification_id)
     runtime = Runtime.load(home)
     if args.command == "import-file":
         batch = FileDataSource().read(args.path)

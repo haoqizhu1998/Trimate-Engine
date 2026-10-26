@@ -20,6 +20,7 @@ from athlete_growth.adapters.storage import (
     VaultLayout,
 )
 from athlete_growth.application import initialize_profile
+from athlete_growth.application.automation import NotificationMode
 from athlete_growth.domain.athlete import UnitSystem
 from athlete_growth.interfaces.cli import commands
 
@@ -59,6 +60,70 @@ def _build_parser() -> argparse.ArgumentParser:
 
     def add_home(command_parser: argparse.ArgumentParser) -> None:
         command_parser.add_argument("--data-home", type=Path, default=_default_data_home())
+
+    automation_configure = subcommands.add_parser(
+        "automation-configure",
+        help="configure automatic Garmin China training updates",
+    )
+    automation_configure.add_argument("--source", default="garmin-cn")
+    automation_configure.add_argument("--interval-minutes", type=int, default=30)
+    automation_configure.add_argument("--lookback-days", type=int, default=3)
+    automation_configure.add_argument(
+        "--notification-mode",
+        choices=tuple(mode.value for mode in NotificationMode),
+        default=NotificationMode.ACTIONABLE_DIGEST.value,
+    )
+    automation_configure.add_argument(
+        "--digest-hour",
+        "--digest-hour-local",
+        dest="digest_hour",
+        type=int,
+        default=20,
+    )
+    automation_configure.add_argument(
+        "--disable",
+        action="store_true",
+        help="save the policy in a paused state",
+    )
+    add_home(automation_configure)
+
+    automation_status = subcommands.add_parser(
+        "automation-status",
+        help="show safe automatic-update status and backlog counts",
+    )
+    add_home(automation_status)
+    automation_run = subcommands.add_parser(
+        "automation-run-once",
+        help="process due or recoverable automatic-update work once",
+    )
+    automation_run.add_argument(
+        "--force",
+        action="store_true",
+        help="make enabled policies due using an idempotent minute slot",
+    )
+    add_home(automation_run)
+    automation_install = subcommands.add_parser(
+        "automation-install-macos",
+        help="install the private macOS launch agent",
+    )
+    add_home(automation_install)
+    automation_uninstall = subcommands.add_parser(
+        "automation-uninstall-macos",
+        help="remove the private macOS launch agent",
+    )
+    add_home(automation_uninstall)
+    notification_list = subcommands.add_parser(
+        "notification-list",
+        help="list local automation notifications",
+    )
+    notification_list.add_argument("--include-read", action="store_true")
+    add_home(notification_list)
+    notification_read = subcommands.add_parser(
+        "notification-read",
+        help="mark one local automation notification read",
+    )
+    notification_read.add_argument("notification_id", metavar="ID")
+    add_home(notification_read)
 
     import_parser = subcommands.add_parser("import-file", help="import CSV/JSON/TCX/FIT")
     import_parser.add_argument("path", type=Path)
