@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from enum import Enum
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, cast
 from zoneinfo import ZoneInfo
 
@@ -240,13 +241,42 @@ class AutomaticTrainingLoop:
             store=self.record_store,
             raw_dir=self.raw_root / subscription.athlete_id,
         )
-        cursor = self.record_store.get_cursor(subscription.athlete_id, subscription.source)
-        batch = connector.sync(window, cursor)
+        batch = ingestion.fetch(connector, window)
         run = self._renew_owned(run)
-        result = ingestion.ingest(batch)
+        assert run.lease_token is not None
+        with TemporaryDirectory(prefix="athlete-growth-ingest-") as staging_directory:
+            with self.automation_repository.lease_fenced_transaction(
+                run.run_id,
+                lease_token=run.lease_token,
+                owner=self.owner,
+                now=self._now(),
+            ) as connection:
+                result = ingestion.ingest(
+                    batch,
+                    connection=connection,
+                    raw_staging_dir=Path(staging_directory),
+                )
+                self.automation_repository.validate_lease(
+                    run.run_id,
+                    lease_token=run.lease_token,
+                    owner=self.owner,
+                    now=self._now(),
+                    connection=connection,
+                )
+                change_set = (
+                    self.automation_repository.save_change_set(
+                        run.run_id,
+                        result,
+                        created_at=self._now(),
+                        lease_token=run.lease_token,
+                        connection=connection,
+                    )
+                    if result.has_changes
+                    else None
+                )
+            ingestion.promote_raw_files(result)
         run = self._renew_owned(run)
         if not result.has_changes:
-            run = self._renew_owned(run)
             self.automation_repository.complete_sync_run(
                 run.run_id,
                 completed_at=self._now(),
@@ -254,13 +284,7 @@ class AutomaticTrainingLoop:
             )
             return _RunOutcome(changed=False)
 
-        change_set = self.automation_repository.save_change_set(
-            run.run_id,
-            result,
-            created_at=self._now(),
-            lease_token=run.lease_token,
-        )
-        run = self._renew_owned(run)
+        assert change_set is not None
         return self._analyze_and_complete(
             subscription,
             run,
@@ -277,6 +301,17 @@ class AutomaticTrainingLoop:
         timezone_name: str,
     ) -> _RunOutcome:
         assert run.lease_token is not None
+        persisted_snapshots = self.automation_repository.list_snapshots_for_change_set(
+            change_set.change_set_id
+        )
+        if persisted_snapshots:
+            return self._complete_from_persisted_effects(
+                subscription,
+                run,
+                change_set,
+                persisted_snapshots,
+                timezone_name=timezone_name,
+            )
         report_service = ReportService(
             subscription.athlete_id,
             self.record_store,
@@ -349,6 +384,63 @@ class AutomaticTrainingLoop:
             notifications=notification_count,
         )
 
+    def _complete_from_persisted_effects(
+        self,
+        subscription: SyncSubscription,
+        run: SyncRun,
+        change_set: DataChangeSet,
+        snapshots: list[AnalysisSnapshot],
+        *,
+        timezone_name: str,
+    ) -> _RunOutcome:
+        """Finish recovery from authoritative effects without re-running analysis."""
+
+        notifications = self.automation_repository.list_notifications_for_change_set(
+            change_set.change_set_id
+        )
+        if subscription.notification_mode is not NotificationMode.OFF and not notifications:
+            selected = self._select_persisted_snapshot(snapshots)
+            risk_level = selected.risk_level
+            actionable = risk_level in {"moderate", "high"}
+            deliver_after = None
+            if (
+                subscription.notification_mode is NotificationMode.ACTIONABLE_DIGEST
+                and not actionable
+            ):
+                deliver_after = self._next_digest(
+                    change_set.created_at,
+                    timezone_name,
+                    subscription.digest_hour_local,
+                )
+            run = self._renew_owned(run)
+            notifications = [
+                self.automation_repository.enqueue_notification(
+                    selected,
+                    priority="actionable" if actionable else "digest",
+                    deliver_after=deliver_after,
+                    title=f"Training data updated: {risk_level} risk",
+                    body=self._persisted_notification_body(
+                        len(change_set.record_ids),
+                        risk_level,
+                        selected.report,
+                    ),
+                    created_at=self._now(),
+                )
+            ]
+
+        run = self._renew_owned(run)
+        assert run.lease_token is not None
+        self.automation_repository.complete_sync_run(
+            run.run_id,
+            completed_at=self._now(),
+            lease_token=run.lease_token,
+        )
+        return _RunOutcome(
+            changed=True,
+            snapshots=len(snapshots),
+            notifications=len(notifications),
+        )
+
     @staticmethod
     def _select_notification(results: list[_SnapshotResult]) -> _SnapshotResult:
         risk_order = {"unknown": 0, "low": 1, "moderate": 2, "high": 3}
@@ -359,6 +451,30 @@ class AutomaticTrainingLoop:
                 result.affected_date is not None,
                 result.affected_date or date.min,
                 result.snapshot.snapshot_id,
+            ),
+        )
+
+    @staticmethod
+    def _select_persisted_snapshot(
+        snapshots: list[AnalysisSnapshot],
+    ) -> AnalysisSnapshot:
+        risk_order = {"unknown": 0, "low": 1, "moderate": 2, "high": 3}
+
+        def affected_date(snapshot: AnalysisSnapshot) -> date:
+            if snapshot.analysis_kind != "daily":
+                return date.min
+            try:
+                return date.fromisoformat(snapshot.period)
+            except ValueError:
+                return date.min
+
+        return max(
+            snapshots,
+            key=lambda snapshot: (
+                risk_order[snapshot.risk_level],
+                snapshot.analysis_kind == "daily",
+                affected_date(snapshot),
+                snapshot.snapshot_id,
             ),
         )
 
@@ -395,28 +511,27 @@ class AutomaticTrainingLoop:
             return
 
     def _renew_owned(self, run: SyncRun) -> SyncRun:
-        """Atomically revalidate ownership and extend the current lease."""
+        """Revalidate ownership and renew only when the lease is near expiry."""
 
         if run.lease_token is None:
             raise ValueError("automatic sync run is missing a lease token")
         now = self._now()
-        current = self.automation_repository.get_sync_run(run.run_id)
-        if (
-            current is None
-            or current.status != "running"
-            or current.lease_token != run.lease_token
-            or current.lease_owner != self.owner
-            or current.lease_expires_at is None
-            or current.lease_expires_at <= now
-        ):
-            raise ValueError("automatic sync run lease is no longer owned")
+        current = self.automation_repository.validate_lease(
+            run.run_id,
+            lease_token=run.lease_token,
+            owner=self.owner,
+            now=now,
+        )
+        assert current.lease_expires_at is not None
         assert current.lease_token is not None
+        if current.lease_expires_at - now > self.lease_duration / 3:
+            return current
         return self.automation_repository.renew_lease(
             current.run_id,
             current.lease_token,
             owner=self.owner,
             now=now,
-            lease_duration=(current.lease_expires_at - now) + self.lease_duration,
+            lease_duration=self.lease_duration,
         )
 
     def _now(self) -> datetime:
@@ -466,5 +581,35 @@ class AutomaticTrainingLoop:
         elif report.data_gaps:
             next_step = f"Review data gap: {report.data_gaps[0]}."
         else:
+            next_step = "Review the latest training analysis."
+        return f"{changed_records} record(s) changed. Risk: {risk_level}. {next_step}"
+
+    @staticmethod
+    def _persisted_notification_body(
+        changed_records: int,
+        risk_level: str,
+        report: Mapping[str, object],
+    ) -> str:
+        next_step: str | None = None
+        safety = report.get("safety")
+        if isinstance(safety, Mapping):
+            actions = safety.get("actions")
+            if (
+                isinstance(actions, Sequence)
+                and not isinstance(actions, str | bytes)
+                and actions
+                and isinstance(actions[0], str)
+            ):
+                next_step = actions[0]
+        if next_step is None:
+            gaps = report.get("data_gaps")
+            if (
+                isinstance(gaps, Sequence)
+                and not isinstance(gaps, str | bytes)
+                and gaps
+                and isinstance(gaps[0], str)
+            ):
+                next_step = f"Review data gap: {gaps[0]}."
+        if next_step is None:
             next_step = "Review the latest training analysis."
         return f"{changed_records} record(s) changed. Risk: {risk_level}. {next_step}"

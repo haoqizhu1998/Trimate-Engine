@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -34,6 +35,19 @@ class SQLiteRecordStore:
                 yield connection
         finally:
             connection.close()
+
+    @contextmanager
+    def _borrow_connection(
+        self,
+        connection: sqlite3.Connection | None,
+    ) -> Iterator[sqlite3.Connection]:
+        """Use a caller-owned transaction or open and commit a local one."""
+
+        if connection is not None:
+            yield connection
+            return
+        with self._connection() as owned:
+            yield owned
 
     def _migrate(self) -> None:
         with self._connection() as connection:
@@ -67,9 +81,14 @@ class SQLiteRecordStore:
             )
         os.chmod(self.database_file, 0o600)
 
-    def save(self, record: CanonicalRecord) -> bool:
-        with self._connection() as connection:
-            cursor = connection.execute(
+    def save(
+        self,
+        record: CanonicalRecord,
+        *,
+        connection: sqlite3.Connection | None = None,
+    ) -> bool:
+        with self._borrow_connection(connection) as active_connection:
+            cursor = active_connection.execute(
                 """
                 INSERT OR IGNORE INTO canonical_records (
                     record_id, athlete_id, kind, occurred_at, data_json,
@@ -81,17 +100,23 @@ class SQLiteRecordStore:
             )
             return cursor.rowcount == 1
 
-    def correct(self, original_id: str, replacement: CanonicalRecord) -> None:
+    def correct(
+        self,
+        original_id: str,
+        replacement: CanonicalRecord,
+        *,
+        connection: sqlite3.Connection | None = None,
+    ) -> None:
         if replacement.supersedes_id != original_id:
             raise ValueError("replacement must identify the record it supersedes")
-        with self._connection() as connection:
-            updated = connection.execute(
+        with self._borrow_connection(connection) as active_connection:
+            updated = active_connection.execute(
                 "UPDATE canonical_records SET is_current = 0 WHERE record_id = ?",
                 (original_id,),
             )
             if updated.rowcount != 1:
                 raise KeyError(original_id)
-            connection.execute(
+            active_connection.execute(
                 """
                 INSERT INTO canonical_records (
                     record_id, athlete_id, kind, occurred_at, data_json,
@@ -102,10 +127,15 @@ class SQLiteRecordStore:
                 self._serialize(replacement),
             )
 
-    def retire(self, record_id: str) -> None:
+    def retire(
+        self,
+        record_id: str,
+        *,
+        connection: sqlite3.Connection | None = None,
+    ) -> None:
         """Keep a record as history while removing it from current projections."""
-        with self._connection() as connection:
-            updated = connection.execute(
+        with self._borrow_connection(connection) as active_connection:
+            updated = active_connection.execute(
                 "UPDATE canonical_records SET is_current = 0 "
                 "WHERE record_id = ? AND is_current = 1",
                 (record_id,),
@@ -113,9 +143,14 @@ class SQLiteRecordStore:
             if updated.rowcount != 1:
                 raise KeyError(record_id)
 
-    def get(self, record_id: str) -> CanonicalRecord | None:
-        with self._connection() as connection:
-            row = connection.execute(
+    def get(
+        self,
+        record_id: str,
+        *,
+        connection: sqlite3.Connection | None = None,
+    ) -> CanonicalRecord | None:
+        with self._borrow_connection(connection) as active_connection:
+            row = active_connection.execute(
                 "SELECT * FROM canonical_records WHERE record_id = ?", (record_id,)
             ).fetchone()
         return self._deserialize(row) if row is not None else None
@@ -127,6 +162,7 @@ class SQLiteRecordStore:
         kind: str | None = None,
         start: datetime | None = None,
         end: datetime | None = None,
+        connection: sqlite3.Connection | None = None,
     ) -> list[CanonicalRecord]:
         clauses = ["athlete_id = ?", "is_current = 1"]
         parameters: list[object] = [athlete_id]
@@ -144,21 +180,35 @@ class SQLiteRecordStore:
             + " AND ".join(clauses)
             + " ORDER BY occurred_at, record_id"
         )
-        with self._connection() as connection:
-            rows = connection.execute(query, parameters).fetchall()
+        with self._borrow_connection(connection) as active_connection:
+            rows = active_connection.execute(query, parameters).fetchall()
         return [self._deserialize(row) for row in rows]
 
-    def get_cursor(self, athlete_id: str, source: str) -> str | None:
-        with self._connection() as connection:
-            row = connection.execute(
+    def get_cursor(
+        self,
+        athlete_id: str,
+        source: str,
+        *,
+        connection: sqlite3.Connection | None = None,
+    ) -> str | None:
+        with self._borrow_connection(connection) as active_connection:
+            row = active_connection.execute(
                 "SELECT cursor FROM sync_cursors WHERE athlete_id = ? AND source = ?",
                 (athlete_id, source),
             ).fetchone()
         return row["cursor"] if row else None
 
-    def set_cursor(self, athlete_id: str, source: str, cursor: str, updated_at: datetime) -> None:
-        with self._connection() as connection:
-            connection.execute(
+    def set_cursor(
+        self,
+        athlete_id: str,
+        source: str,
+        cursor: str,
+        updated_at: datetime,
+        *,
+        connection: sqlite3.Connection | None = None,
+    ) -> None:
+        with self._borrow_connection(connection) as active_connection:
+            active_connection.execute(
                 """
                 INSERT INTO sync_cursors(athlete_id, source, cursor, updated_at)
                 VALUES (?, ?, ?, ?)

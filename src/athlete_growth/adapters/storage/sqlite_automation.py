@@ -863,6 +863,101 @@ class SQLiteAutomationRepository:
             ).fetchone()
         return self._sync_run_from_row(row) if row is not None else None
 
+    @classmethod
+    def _validate_owned_lease(
+        cls,
+        connection: sqlite3.Connection,
+        run_id: str,
+        *,
+        lease_token: str,
+        owner: str,
+        now: datetime,
+    ) -> SyncRun:
+        row = connection.execute(
+            "SELECT * FROM automation_sync_runs WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(run_id)
+        run = cls._sync_run_from_row(row)
+        if (
+            run.status != "running"
+            or run.lease_token != lease_token
+            or run.lease_owner != owner
+            or run.lease_expires_at is None
+            or run.lease_expires_at <= now
+        ):
+            raise ValueError("automatic sync run lease is no longer owned")
+        return run
+
+    def validate_lease(
+        self,
+        run_id: str,
+        *,
+        lease_token: str,
+        owner: str,
+        now: datetime,
+        connection: sqlite3.Connection | None = None,
+    ) -> SyncRun:
+        """Return the current run only while this active lease is still owned."""
+
+        checked_at = self._datetime(now, "now")
+        if not lease_token.strip():
+            raise ValueError("lease token must not be blank")
+        if not owner.strip():
+            raise ValueError("lease owner must not be blank")
+        if connection is not None:
+            return self._validate_owned_lease(
+                connection,
+                run_id,
+                lease_token=lease_token,
+                owner=owner,
+                now=checked_at,
+            )
+        with self._connection() as owned_connection:
+            return self._validate_owned_lease(
+                owned_connection,
+                run_id,
+                lease_token=lease_token,
+                owner=owner,
+                now=checked_at,
+            )
+
+    @contextmanager
+    def lease_fenced_transaction(
+        self,
+        run_id: str,
+        *,
+        lease_token: str,
+        owner: str,
+        now: datetime,
+    ) -> Iterator[sqlite3.Connection]:
+        """Hold the SQLite write lock while lease-owned ingestion is committed."""
+
+        checked_at = self._datetime(now, "now")
+        if not lease_token.strip():
+            raise ValueError("lease token must not be blank")
+        if not owner.strip():
+            raise ValueError("lease owner must not be blank")
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            self._validate_owned_lease(
+                connection,
+                run_id,
+                lease_token=lease_token,
+                owner=owner,
+                now=checked_at,
+            )
+            yield connection
+            connection.commit()
+        except BaseException:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        finally:
+            connection.close()
+
     def latest_sync_run(self, athlete_id: str, source: str) -> SyncRun | None:
         with self._connection() as connection:
             row = connection.execute(
@@ -1033,71 +1128,97 @@ class SQLiteAutomationRepository:
         *,
         created_at: datetime,
         lease_token: str | None = None,
+        connection: sqlite3.Connection | None = None,
     ) -> DataChangeSet:
         created = self._datetime(created_at, "created_at")
-        connection = self._connect()
+        if connection is not None:
+            return self._save_change_set(
+                connection,
+                run_id,
+                result,
+                created=created,
+                lease_token=lease_token,
+            )
+        owned_connection = self._connect()
         try:
-            connection.execute("BEGIN IMMEDIATE")
-            run_row = connection.execute(
-                "SELECT * FROM automation_sync_runs WHERE run_id = ?",
-                (run_id,),
-            ).fetchone()
-            if run_row is None:
-                raise KeyError(run_id)
-            run = self._sync_run_from_row(run_row)
-            change_set = DataChangeSet(
-                change_set_id=self._identifier("change-set", run_id),
-                run_id=run_id,
-                athlete_id=run.athlete_id,
-                source=run.source,
-                record_ids=tuple(result.changed_record_ids),
-                affected_dates=tuple(result.affected_dates),
-                created_at=created,
+            owned_connection.execute("BEGIN IMMEDIATE")
+            change_set = self._save_change_set(
+                owned_connection,
+                run_id,
+                result,
+                created=created,
+                lease_token=lease_token,
             )
-            row = connection.execute(
-                "SELECT * FROM data_change_sets WHERE run_id = ?",
-                (run_id,),
-            ).fetchone()
-            if row is not None:
-                existing = self._change_set_from_row(row)
-                if (
-                    existing.athlete_id != change_set.athlete_id
-                    or existing.source != change_set.source
-                    or existing.record_ids != change_set.record_ids
-                    or existing.affected_dates != change_set.affected_dates
-                ):
-                    raise ValueError("change set idempotency conflict")
-                connection.commit()
-                return existing
-            if run.status != "running":
-                raise ValueError("sync run must be running to create a change set")
-            if run.lease_token != lease_token:
-                raise ValueError("sync run lease token conflict")
-            connection.execute(
-                """
-                INSERT INTO data_change_sets (
-                    change_set_id, run_id, athlete_id, source, record_ids_json,
-                    affected_dates_json, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    change_set.change_set_id,
-                    change_set.run_id,
-                    change_set.athlete_id,
-                    change_set.source,
-                    json.dumps(change_set.record_ids, ensure_ascii=False),
-                    json.dumps([value.isoformat() for value in change_set.affected_dates]),
-                    change_set.created_at.isoformat(),
-                ),
-            )
-            connection.commit()
+            owned_connection.commit()
             return change_set
         except BaseException:
-            if connection.in_transaction:
-                connection.rollback()
+            if owned_connection.in_transaction:
+                owned_connection.rollback()
             raise
         finally:
-            connection.close()
+            owned_connection.close()
+
+    def _save_change_set(
+        self,
+        connection: sqlite3.Connection,
+        run_id: str,
+        result: IngestionResult,
+        *,
+        created: datetime,
+        lease_token: str | None,
+    ) -> DataChangeSet:
+        run_row = connection.execute(
+            "SELECT * FROM automation_sync_runs WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()
+        if run_row is None:
+            raise KeyError(run_id)
+        run = self._sync_run_from_row(run_row)
+        change_set = DataChangeSet(
+            change_set_id=self._identifier("change-set", run_id),
+            run_id=run_id,
+            athlete_id=run.athlete_id,
+            source=run.source,
+            record_ids=tuple(result.changed_record_ids),
+            affected_dates=tuple(result.affected_dates),
+            created_at=created,
+        )
+        row = connection.execute(
+            "SELECT * FROM data_change_sets WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()
+        if row is not None:
+            existing = self._change_set_from_row(row)
+            if (
+                existing.athlete_id != change_set.athlete_id
+                or existing.source != change_set.source
+                or existing.record_ids != change_set.record_ids
+                or existing.affected_dates != change_set.affected_dates
+            ):
+                raise ValueError("change set idempotency conflict")
+            return existing
+        if run.status != "running":
+            raise ValueError("sync run must be running to create a change set")
+        if run.lease_token != lease_token:
+            raise ValueError("sync run lease token conflict")
+        connection.execute(
+            """
+            INSERT INTO data_change_sets (
+                change_set_id, run_id, athlete_id, source, record_ids_json,
+                affected_dates_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                change_set.change_set_id,
+                change_set.run_id,
+                change_set.athlete_id,
+                change_set.source,
+                json.dumps(change_set.record_ids, ensure_ascii=False),
+                json.dumps([value.isoformat() for value in change_set.affected_dates]),
+                change_set.created_at.isoformat(),
+            ),
+        )
+        return change_set
 
     def save_snapshot(
         self,
@@ -1197,6 +1318,20 @@ class SQLiteAutomationRepository:
             ).fetchall()
         return [self._snapshot_from_row(row) for row in rows]
 
+    def list_snapshots_for_change_set(self, change_set_id: str) -> list[AnalysisSnapshot]:
+        """Return already-persisted analysis effects for recovery."""
+
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM analysis_snapshots
+                WHERE change_set_id = ?
+                ORDER BY created_at, analysis_kind, period, algorithm_version, snapshot_id
+                """,
+                (change_set_id,),
+            ).fetchall()
+        return [self._snapshot_from_row(row) for row in rows]
+
     def enqueue_notification(
         self,
         snapshot: AnalysisSnapshot,
@@ -1286,6 +1421,26 @@ class SQLiteAutomationRepository:
         query += " ORDER BY created_at, notification_id"
         with self._connection() as connection:
             rows = connection.execute(query, (athlete_id,)).fetchall()
+        return [self._notification_from_row(row) for row in rows]
+
+    def list_notifications_for_change_set(
+        self,
+        change_set_id: str,
+    ) -> list[UserNotification]:
+        """Return notifications already derived from a durable change set."""
+
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT notification_inbox.*
+                FROM notification_inbox
+                JOIN analysis_snapshots
+                  ON analysis_snapshots.snapshot_id = notification_inbox.snapshot_id
+                WHERE analysis_snapshots.change_set_id = ?
+                ORDER BY notification_inbox.created_at, notification_inbox.notification_id
+                """,
+                (change_set_id,),
+            ).fetchall()
         return [self._notification_from_row(row) for row in rows]
 
     def list_unread(self, athlete_id: str) -> list[UserNotification]:

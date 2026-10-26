@@ -5,8 +5,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sqlite3
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from time import sleep
@@ -30,6 +31,11 @@ class IngestionResult:
     raw_files: int
     changed_record_ids: tuple[str, ...] = ()
     affected_dates: tuple[date, ...] = ()
+    staged_raw_files: tuple[tuple[Path, Path], ...] = field(
+        default=(),
+        repr=False,
+        compare=False,
+    )
 
     @property
     def has_changes(self) -> bool:
@@ -42,7 +48,13 @@ class IngestionService:
         self.store = store
         self.raw_dir = raw_dir
 
-    def ingest(self, batch: SyncBatch) -> IngestionResult:
+    def ingest(
+        self,
+        batch: SyncBatch,
+        *,
+        connection: sqlite3.Connection | None = None,
+        raw_staging_dir: Path | None = None,
+    ) -> IngestionResult:
         inserted = 0
         updated = 0
         retired = 0
@@ -51,8 +63,12 @@ class IngestionService:
         sources: set[str] = set()
         changed_record_ids: set[str] = set()
         affected_dates: set[date] = set()
+        staged_raw_files: list[tuple[Path, Path]] = []
         current_by_source: dict[tuple[str, str, str], list[CanonicalRecord]] = {}
-        for current in self.store.list_current(self.athlete_id):
+        for current in self.store.list_current(
+            self.athlete_id,
+            connection=connection,
+        ):
             for evidence in current.evidence:
                 current_by_source.setdefault(
                     (evidence.source, current.kind, evidence.source_id), []
@@ -64,13 +80,16 @@ class IngestionService:
             ).encode("utf-8")
             digest = hashlib.sha256(payload_bytes).hexdigest()
             destination = self.raw_dir / raw.source / digest[:2] / f"{digest}.json"
-            destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-            os.chmod(destination.parent, 0o700)
-            if not destination.exists():
-                descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-                with os.fdopen(descriptor, "wb") as handle:
-                    handle.write(payload_bytes)
-                raw_files += 1
+            raw_created, staged = self._stage_raw_file(
+                destination,
+                payload_bytes,
+                raw.source,
+                digest,
+                raw_staging_dir=raw_staging_dir,
+            )
+            raw_files += int(raw_created)
+            if staged is not None:
+                staged_raw_files.append((staged, destination))
             canonical_payload = raw.canonical_payload or raw.payload
             flags = self._quality_flags(canonical_payload)
             candidate = CanonicalRecord.create(
@@ -93,6 +112,7 @@ class IngestionService:
                 raw,
                 canonical_payload,
                 current_by_source,
+                connection=connection,
             )
             retired += len(retired_records)
             for record in retired_records:
@@ -100,17 +120,13 @@ class IngestionService:
                 affected_dates.add(self._affected_date(record))
             existing_versions = current_by_source.get(source_key, [])
             existing = next(
-                (
-                    record
-                    for record in existing_versions
-                    if self._equivalent(record, candidate)
-                ),
+                (record for record in existing_versions if self._equivalent(record, candidate)),
                 existing_versions[-1] if existing_versions else None,
             )
             for extra in existing_versions:
                 if extra is existing:
                     continue
-                self.store.retire(extra.record_id)
+                self.store.retire(extra.record_id, connection=connection)
                 retired += 1
                 changed_record_ids.add(extra.record_id)
                 affected_dates.add(self._affected_date(extra))
@@ -128,13 +144,17 @@ class IngestionService:
                     quality_flags=flags,
                     supersedes_id=existing.record_id,
                 )
-                self.store.correct(existing.record_id, replacement)
+                self.store.correct(
+                    existing.record_id,
+                    replacement,
+                    connection=connection,
+                )
                 current_by_source[source_key] = [replacement]
                 updated += 1
                 changed_record_ids.add(replacement.record_id)
                 affected_dates.add(self._affected_date(existing))
                 affected_dates.add(self._affected_date(replacement))
-            elif self.store.save(candidate):
+            elif self.store.save(candidate, connection=connection):
                 current_by_source[source_key] = [candidate]
                 inserted += 1
                 changed_record_ids.add(candidate.record_id)
@@ -148,6 +168,7 @@ class IngestionService:
                     source,
                     batch.next_cursor,
                     datetime.now(UTC),
+                    connection=connection,
                 )
         return IngestionResult(
             inserted,
@@ -157,13 +178,57 @@ class IngestionService:
             raw_files,
             changed_record_ids=tuple(sorted(changed_record_ids)),
             affected_dates=tuple(sorted(affected_dates)),
+            staged_raw_files=tuple(staged_raw_files),
         )
+
+    @staticmethod
+    def _stage_raw_file(
+        destination: Path,
+        payload: bytes,
+        source: str,
+        digest: str,
+        *,
+        raw_staging_dir: Path | None,
+    ) -> tuple[bool, Path | None]:
+        if destination.exists():
+            return False, None
+        target = (
+            destination
+            if raw_staging_dir is None
+            else raw_staging_dir / source / digest[:2] / destination.name
+        )
+        target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(target.parent, 0o700)
+        if target.exists():
+            return False, None
+        try:
+            descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            return False, None
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(payload)
+        return True, target if raw_staging_dir is not None else None
+
+    @staticmethod
+    def promote_raw_files(result: IngestionResult) -> None:
+        """Publish transaction-staged immutable raw files after the DB commit."""
+
+        for staged, destination in result.staged_raw_files:
+            destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            os.chmod(destination.parent, 0o700)
+            if destination.exists():
+                staged.unlink(missing_ok=True)
+                continue
+            os.replace(staged, destination)
+            os.chmod(destination, 0o600)
 
     def _retire_legacy_daily_duplicates(
         self,
         raw: RawSourceRecord,
         canonical_payload: Mapping[str, JsonValue],
         current_by_source: dict[tuple[str, str, str], list[CanonicalRecord]],
+        *,
+        connection: sqlite3.Connection | None,
     ) -> tuple[CanonicalRecord, ...]:
         """Replace legacy per-day fragments once a canonical daily row arrives."""
         if raw.kind == "body-weight" and ":body-weight:" not in raw.source_id:
@@ -171,6 +236,7 @@ class IngestionService:
                 raw,
                 current_by_source,
                 lambda source_id: ":body-weight:" in source_id,
+                connection=connection,
             )
         daily_kinds = {"steps", "sleep", "hrv", "heart-rate", "stress", "body-battery"}
         calendar_date = canonical_payload.get("calendar_date")
@@ -185,6 +251,7 @@ class IngestionService:
             raw,
             current_by_source,
             lambda source_id: source_id.startswith(legacy_prefix),
+            connection=connection,
         )
 
     def _retire_matching_source_ids(
@@ -192,6 +259,8 @@ class IngestionService:
         raw: RawSourceRecord,
         current_by_source: dict[tuple[str, str, str], list[CanonicalRecord]],
         matches: Callable[[str], bool],
+        *,
+        connection: sqlite3.Connection | None,
     ) -> tuple[CanonicalRecord, ...]:
         retired: list[CanonicalRecord] = []
         for source_key in list(current_by_source):
@@ -199,16 +268,14 @@ class IngestionService:
             if source != raw.source or kind != raw.kind or not matches(source_id):
                 continue
             for record in current_by_source.pop(source_key):
-                self.store.retire(record.record_id)
+                self.store.retire(record.record_id, connection=connection)
                 retired.append(record)
         return tuple(retired)
 
     @staticmethod
     def _equivalent(existing: CanonicalRecord, candidate: CanonicalRecord) -> bool:
         def evidence_identity(record: CanonicalRecord) -> tuple[tuple[str, str, str | None], ...]:
-            return tuple(
-                (item.source, item.source_id, item.raw_hash) for item in record.evidence
-            )
+            return tuple((item.source, item.source_id, item.raw_hash) for item in record.evidence)
 
         return (
             existing.athlete_id == candidate.athlete_id
@@ -230,6 +297,30 @@ class IngestionService:
                 pass
         return record.occurred_at.date()
 
+    def fetch(
+        self,
+        connector: DataSourceConnector,
+        window: SyncWindow,
+        *,
+        max_attempts: int = 3,
+    ) -> SyncBatch:
+        """Fetch one batch with bounded retries and without mutating local state."""
+
+        if isinstance(max_attempts, bool) or not isinstance(max_attempts, int) or max_attempts < 1:
+            raise ValueError("max_attempts must be a positive integer")
+        source = connector.capabilities().source
+        cursor = self.store.get_cursor(self.athlete_id, source)
+        last_error: Exception | None = None
+        for attempt in range(max_attempts):
+            try:
+                return connector.sync(window, cursor)
+            except (ConnectionError, TimeoutError, OSError) as exc:
+                last_error = exc
+                if attempt + 1 < max_attempts:
+                    sleep(0.05 * (2**attempt))
+        assert last_error is not None
+        raise last_error
+
     def sync(
         self,
         connector: DataSourceConnector,
@@ -237,18 +328,7 @@ class IngestionService:
         *,
         max_attempts: int = 3,
     ) -> IngestionResult:
-        source = connector.capabilities().source
-        cursor = self.store.get_cursor(self.athlete_id, source)
-        last_error: Exception | None = None
-        for attempt in range(max_attempts):
-            try:
-                return self.ingest(connector.sync(window, cursor))
-            except (ConnectionError, TimeoutError, OSError) as exc:
-                last_error = exc
-                if attempt + 1 < max_attempts:
-                    sleep(0.05 * (2**attempt))
-        assert last_error is not None
-        raise last_error
+        return self.ingest(self.fetch(connector, window, max_attempts=max_attempts))
 
     def sync_chunked(
         self,
@@ -311,11 +391,6 @@ class IngestionService:
         }
         flags: list[str] = []
         for key, value in payload.items():
-            if (
-                key in non_negative_metrics
-                and
-                isinstance(value, (int, float))
-                and value < 0
-            ):
+            if key in non_negative_metrics and isinstance(value, (int, float)) and value < 0:
                 flags.append(f"negative:{key}")
         return tuple(flags)

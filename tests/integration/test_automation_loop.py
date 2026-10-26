@@ -8,6 +8,7 @@ from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from threading import Event, Thread
 from unittest.mock import patch
 
 from athlete_growth.adapters.notifications.macos import MacOSNotificationSink
@@ -97,6 +98,20 @@ class FailsOnceSink(RecordingSink):
         if self.calls == 1:
             raise OSError("notification center unavailable")
         super().deliver(notification)
+
+
+class FailsOnceConnector(MutableConnector):
+    def __init__(self, source: str, records: tuple[RawSourceRecord, ...]) -> None:
+        super().__init__(source, records)
+        self.attempts = 0
+
+    def sync(self, window: SyncWindow, cursor: str | None) -> SyncBatch:
+        self.attempts += 1
+        if self.attempts == 1:
+            self.windows.append(window)
+            self.cursors.append(cursor)
+            raise ConnectionError("temporary connector outage")
+        return super().sync(window, cursor)
 
 
 def _record(
@@ -556,6 +571,178 @@ class AutomaticTrainingLoopTests(unittest.TestCase):
             "cursor-after",
         )
 
+    def test_transient_fetch_failure_retries_before_ingestion(self) -> None:
+        self.add_profile()
+        self.add_subscription("watch")
+        connector = FailsOnceConnector(
+            "watch",
+            (
+                _record(
+                    "watch",
+                    "check-in",
+                    "retry-success",
+                    occurred_at=datetime(2026, 10, 26, 8, 0, tzinfo=UTC),
+                    pain=0,
+                ),
+            ),
+        )
+
+        result = self.loop({"watch": connector}).run_once(limit=1)
+
+        run = self.automation.latest_sync_run("athlete-001", "watch")
+        assert run is not None
+        self.assertEqual((result.completed, result.failed), (1, 0))
+        self.assertEqual(run.status, "completed")
+        self.assertEqual(connector.attempts, 2)
+        self.assertEqual(len(self.records.list_current("athlete-001")), 1)
+
+    def test_repeated_lease_checks_only_renew_near_expiry(self) -> None:
+        self.add_profile()
+        self.add_subscription("watch")
+        claimed = self.automation.claim_due(
+            self.clock(),
+            owner="integration-worker",
+            lease_duration=timedelta(minutes=5),
+            limit=1,
+        )[0][1]
+        assert claimed.lease_expires_at is not None
+        original_expiry = claimed.lease_expires_at
+        loop = self.loop({})
+
+        current = claimed
+        for _ in range(10):
+            current = loop._renew_owned(current)
+        self.assertEqual(current.lease_expires_at, original_expiry)
+
+        self.clock.now += timedelta(minutes=4)
+        current = loop._renew_owned(current)
+        self.assertEqual(current.lease_expires_at, self.clock() + timedelta(minutes=5))
+        renewed_expiry = current.lease_expires_at
+
+        for _ in range(10):
+            current = loop._renew_owned(current)
+        self.assertEqual(current.lease_expires_at, renewed_expiry)
+
+    def test_fenced_ingestion_blocks_reclaim_and_rejects_stale_token(self) -> None:
+        self.add_profile()
+        self.add_subscription("watch")
+        claimed = self.automation.claim_due(
+            self.clock(),
+            owner="integration-worker",
+            lease_duration=timedelta(minutes=5),
+            limit=1,
+        )[0][1]
+        assert claimed.lease_token is not None
+        transaction = getattr(self.automation, "lease_fenced_transaction", None)
+        self.assertIsNotNone(transaction)
+        assert transaction is not None
+        ingestion = IngestionService(
+            athlete_id="athlete-001",
+            store=self.records,
+            raw_dir=self.root / "raw" / "athlete-001",
+        )
+        batch = SyncBatch(
+            (
+                _record(
+                    "watch",
+                    "check-in",
+                    "fenced",
+                    occurred_at=datetime(2026, 10, 26, 8, 0, tzinfo=UTC),
+                    pain=0,
+                ),
+            ),
+            next_cursor="cursor-fenced",
+        )
+        started = Event()
+        finished = Event()
+        reclaimed_runs = []
+
+        def reclaim() -> None:
+            started.set()
+            reclaimed_runs.append(
+                self.automation.reclaim_sync_run(
+                    claimed.run_id,
+                    now=self.clock(),
+                    owner="takeover-worker",
+                    lease_duration=timedelta(minutes=5),
+                )
+            )
+            finished.set()
+
+        staging_root = self.root / "staging"
+        self.clock.now += timedelta(minutes=6)
+        with transaction(
+            claimed.run_id,
+            lease_token=claimed.lease_token,
+            owner="integration-worker",
+            now=claimed.started_at,
+        ) as connection:
+            thread = Thread(target=reclaim, daemon=True)
+            thread.start()
+            self.assertTrue(started.wait(1))
+            self.assertFalse(finished.wait(0.05))
+            result = ingestion.ingest(
+                batch,
+                connection=connection,
+                raw_staging_dir=staging_root,
+            )
+            change_set = self.automation.save_change_set(
+                claimed.run_id,
+                result,
+                created_at=claimed.started_at,
+                lease_token=claimed.lease_token,
+                connection=connection,
+            )
+
+        self.assertTrue(finished.wait(2))
+        thread.join(timeout=2)
+        self.assertEqual(len(reclaimed_runs), 1)
+        self.assertEqual(reclaimed_runs[0].lease_owner, "takeover-worker")
+        self.assertEqual(change_set.run_id, claimed.run_id)
+        self.assertEqual(len(self.records.list_current("athlete-001")), 1)
+        self.assertEqual(self.records.get_cursor("athlete-001", "watch"), "cursor-fenced")
+        with (
+            self.assertRaisesRegex(ValueError, "lease"),
+            transaction(
+                claimed.run_id,
+                lease_token=claimed.lease_token,
+                owner="integration-worker",
+                now=self.clock(),
+            ),
+        ):
+            self.fail("stale lease unexpectedly entered fenced transaction")
+
+    def test_failed_fenced_ingestion_rolls_back_records_cursor_change_set_and_raw(self) -> None:
+        self.add_profile()
+        self.add_subscription("watch")
+        first = _record(
+            "watch",
+            "check-in",
+            "valid-before-failure",
+            occurred_at=datetime(2026, 10, 26, 8, 0, tzinfo=UTC),
+            pain=0,
+        )
+        invalid = RawSourceRecord(
+            source="watch",
+            kind="check-in",
+            source_id="invalid",
+            occurred_at=datetime(2026, 10, 26, 9, 0, tzinfo=UTC),
+            payload={"unsupported": object()},  # type: ignore[dict-item]
+        )
+        connector = MutableConnector("watch", (first, invalid), next_cursor="must-rollback")
+
+        result = self.loop({"watch": connector}).run_once(limit=1)
+
+        run = self.automation.latest_sync_run("athlete-001", "watch")
+        assert run is not None
+        self.assertEqual((result.completed, result.failed), (0, 1))
+        self.assertEqual(run.status, "failed")
+        self.assertEqual(self.records.list_current("athlete-001"), [])
+        self.assertIsNone(self.records.get_cursor("athlete-001", "watch"))
+        self.assertEqual(self.table_count("data_change_sets"), 0)
+        raw_root = self.root / "raw" / "athlete-001"
+        self.assertFalse(raw_root.exists() and any(raw_root.rglob("*.json")))
+
     def test_reclaim_during_fetch_prevents_stale_worker_mutation(self) -> None:
         self.add_profile()
         self.add_subscription("watch")
@@ -636,10 +823,14 @@ class AutomaticTrainingLoopTests(unittest.TestCase):
         first_run = self.automation.latest_sync_run("athlete-001", "a-slow")
         second_run = self.automation.latest_sync_run("athlete-001", "b-fast")
         assert first_run is not None and second_run is not None
-        self.assertEqual((result.claimed, result.completed, result.failed), (2, 2, 0))
+        self.assertEqual((result.claimed, result.completed, result.failed), (2, 1, 1))
         self.assertEqual(first_run.started_at, initial_now)
+        self.assertEqual(first_run.status, "running")
+        assert first_run.lease_expires_at is not None
+        self.assertLessEqual(first_run.lease_expires_at, self.clock())
         self.assertEqual(second_run.started_at, initial_now + timedelta(minutes=6))
-        self.assertEqual(len(self.records.list_current("athlete-001")), 2)
+        self.assertEqual(second_run.status, "completed")
+        self.assertEqual(len(self.records.list_current("athlete-001")), 1)
 
     def test_digest_is_due_at_the_exact_configured_local_hour(self) -> None:
         boundary = datetime(2026, 10, 26, 15, 0, tzinfo=UTC)
@@ -785,6 +976,140 @@ class AutomaticTrainingLoopTests(unittest.TestCase):
         self.assertEqual((result.recovered, result.completed, result.failed), (1, 1, 0))
         self.assertEqual(recovered.status, "completed")
         self.assertEqual(notification.deliver_after, original.deliver_after)
+
+    def test_recovery_treats_partial_snapshots_as_authoritative(self) -> None:
+        self.add_profile()
+        self.add_subscription("watch")
+        connector = MutableConnector(
+            "watch",
+            (
+                _record(
+                    "watch",
+                    "check-in",
+                    "partial-low",
+                    occurred_at=datetime(2026, 10, 26, 8, 0, tzinfo=UTC),
+                    pain=0,
+                    fatigue=2,
+                    soreness=2,
+                    illness=False,
+                ),
+            ),
+        )
+        loop = self.loop({"watch": connector})
+        original_save = self.automation.save_snapshot
+        save_calls = 0
+
+        def crash_before_second_snapshot(*args, **kwargs):
+            nonlocal save_calls
+            save_calls += 1
+            if save_calls == 2:
+                raise SystemExit("simulated crash between snapshots")
+            return original_save(*args, **kwargs)
+
+        with (
+            patch.object(
+                self.automation,
+                "save_snapshot",
+                side_effect=crash_before_second_snapshot,
+            ),
+            self.assertRaisesRegex(SystemExit, "between snapshots"),
+        ):
+            loop.run_once(limit=1)
+
+        crashed_run = self.automation.latest_sync_run("athlete-001", "watch")
+        assert crashed_run is not None
+        change_set = self.automation.get_change_set_for_run(crashed_run.run_id)
+        assert change_set is not None
+        original = self.automation.list_snapshots_for_change_set(change_set.change_set_id)
+        self.assertEqual(len(original), 1)
+        self.assertEqual(
+            self.automation.list_notifications_for_change_set(change_set.change_set_id), []
+        )
+        self.clock.now += timedelta(minutes=6)
+
+        result = loop.run_once(limit=1)
+
+        recovered = self.automation.get_sync_run(crashed_run.run_id)
+        snapshots = self.automation.list_snapshots_for_change_set(change_set.change_set_id)
+        notifications = self.automation.list_notifications_for_change_set(change_set.change_set_id)
+        assert recovered is not None
+        self.assertEqual((result.recovered, result.completed, result.failed), (1, 1, 0))
+        self.assertEqual(recovered.status, "completed")
+        self.assertEqual(snapshots, original)
+        self.assertEqual(len(notifications), 1)
+        self.assertEqual(notifications[0].snapshot_id, original[0].snapshot_id)
+
+    def test_recovery_reuses_snapshots_after_other_source_changes_same_day(self) -> None:
+        self.add_profile()
+        self.add_subscription("watch")
+        low_connector = MutableConnector(
+            "watch",
+            (
+                _record(
+                    "watch",
+                    "check-in",
+                    "original-low",
+                    occurred_at=datetime(2026, 10, 26, 8, 0, tzinfo=UTC),
+                    pain=0,
+                    fatigue=2,
+                    soreness=2,
+                    illness=False,
+                ),
+            ),
+        )
+        loop = self.loop({"watch": low_connector})
+
+        with (
+            patch.object(
+                self.automation,
+                "complete_sync_run",
+                side_effect=SystemExit("simulated crash after persisted effects"),
+            ),
+            self.assertRaisesRegex(SystemExit, "persisted effects"),
+        ):
+            loop.run_once(limit=1)
+
+        crashed_run = self.automation.latest_sync_run("athlete-001", "watch")
+        assert crashed_run is not None
+        original_snapshots = self.automation.list_snapshots("athlete-001")
+        original_notification = self.automation.list_unread("athlete-001")[0]
+        original_daily = next(item for item in original_snapshots if item.analysis_kind == "daily")
+        self.assertEqual(original_daily.risk_level, "low")
+
+        IngestionService(
+            athlete_id="athlete-001",
+            store=self.records,
+            raw_dir=self.root / "raw" / "athlete-001",
+        ).ingest(
+            SyncBatch(
+                (
+                    _record(
+                        "other-source",
+                        "check-in",
+                        "later-high",
+                        occurred_at=datetime(2026, 10, 26, 10, 0, tzinfo=UTC),
+                        pain=8,
+                        fatigue=2,
+                        soreness=2,
+                        illness=False,
+                    ),
+                )
+            )
+        )
+        self.clock.now += timedelta(days=1)
+
+        result = loop.run_once(limit=1)
+
+        recovered = self.automation.get_sync_run(crashed_run.run_id)
+        snapshots = self.automation.list_snapshots("athlete-001")
+        notifications = self.automation.list_unread("athlete-001")
+        assert recovered is not None
+        self.assertEqual((result.recovered, result.completed, result.failed), (1, 1, 0))
+        self.assertEqual(recovered.status, "completed")
+        self.assertEqual(snapshots, original_snapshots)
+        self.assertEqual(len(notifications), 1)
+        self.assertEqual(notifications[0].notification_id, original_notification.notification_id)
+        self.assertEqual(notifications[0].snapshot_id, original_daily.snapshot_id)
 
 
 class MacOSNotificationSinkTests(unittest.TestCase):
