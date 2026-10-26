@@ -69,7 +69,7 @@ athlete-growth restore profile.zip --target-home /path/to/new-private-home
 athlete-growth garmin-cn-login --email "your-cn-account@example.com"
 athlete-growth sync --start 2026-10-01 --end 2026-10-26
 # 首次全量回填（默认每 28 天落盘一批，中断后可安全重跑）
-athlete-growth sync --start 2024-06-04 --end 2026-10-26 --chunk-days 28
+athlete-growth sync --start 2024-06-02 --end 2026-10-26 --chunk-days 28
 athlete-growth garmin-cn-revoke
 ```
 
