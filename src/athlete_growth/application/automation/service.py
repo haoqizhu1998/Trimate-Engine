@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 
 from athlete_growth.adapters.storage.sqlite_records import SQLiteRecordStore
 from athlete_growth.application.automation.models import (
+    LEGACY_PROJECTION_UNAVAILABLE,
     AnalysisSnapshot,
     DataChangeSet,
     NotificationMode,
@@ -22,6 +23,7 @@ from athlete_growth.application.automation.models import (
 )
 from athlete_growth.application.ingest.service import IngestionService
 from athlete_growth.application.report.service import ReportService, WellnessReport
+from athlete_growth.domain.identifiers import require_strict_child
 from athlete_growth.domain.records import JsonValue
 from athlete_growth.ports.data_source import DataSourceConnector, SyncWindow
 from athlete_growth.ports.notification import NoopNotificationSink, NotificationSink
@@ -192,15 +194,32 @@ class AutomaticTrainingLoop:
         """
 
         self._positive_limit(limit, "limit")
-        due = self.automation_repository.claim_pending(
-            self._now(),
-            owner=self.owner,
-            lease_duration=self.lease_duration,
-            limit=limit,
-        )
-        delivered = failed = 0
-        for notification in due:
+        attempted = delivered = failed = 0
+        for _ in range(limit):
+            claimed = self.automation_repository.claim_pending(
+                self._now(),
+                owner=self.owner,
+                lease_duration=self.lease_duration,
+                limit=1,
+                lease_clock=self._now,
+            )
+            if not claimed:
+                break
+            notification = claimed[0]
+            attempted += 1
             assert notification.delivery_lease_token is not None
+            try:
+                notification = self.automation_repository.renew_delivery_claim(
+                    notification.notification_id,
+                    lease_token=notification.delivery_lease_token,
+                    owner=self.owner,
+                    now=self._now(),
+                    lease_duration=self.lease_duration,
+                    lease_clock=self._now,
+                )
+            except Exception:
+                failed += 1
+                continue
             try:
                 self.notification_sink.deliver(notification)
             except Exception as exc:
@@ -226,7 +245,7 @@ class AutomaticTrainingLoop:
                 failed += 1
                 continue
             delivered += 1
-        return DeliverySummary(attempted=len(due), delivered=delivered, failed=failed)
+        return DeliverySummary(attempted=attempted, delivered=delivered, failed=failed)
 
     def _process(self, subscription: SyncSubscription, run: SyncRun) -> _RunOutcome:
         profile = self.profile_repository.get_by_id(subscription.athlete_id)
@@ -256,16 +275,22 @@ class AutomaticTrainingLoop:
             local_today - timedelta(days=subscription.lookback_days - 1),
             local_today,
         )
+        athlete_raw_root = require_strict_child(
+            self.raw_root,
+            self.raw_root / subscription.athlete_id,
+            "athlete raw root",
+        )
         ingestion = IngestionService(
             athlete_id=subscription.athlete_id,
             store=self.record_store,
-            raw_dir=self.raw_root / subscription.athlete_id,
+            raw_dir=athlete_raw_root,
             timezone_name=profile.timezone_name,
         )
         batch = ingestion.fetch(connector, window)
+        if any(raw.source != subscription.source for raw in batch.records):
+            raise ValueError("sync batch source does not match subscription")
         run = self._renew_owned(run)
         assert run.lease_token is not None
-        athlete_raw_root = self.raw_root / subscription.athlete_id
         athlete_raw_root.mkdir(parents=True, exist_ok=True, mode=0o700)
         with (
             TemporaryDirectory(
@@ -487,6 +512,8 @@ class AutomaticTrainingLoop:
     def _verify_raw_evidence(self, change_set: DataChangeSet) -> None:
         """Refuse analysis completion when a referenced immutable raw object is absent."""
 
+        if LEGACY_PROJECTION_UNAVAILABLE in change_set.projection_record_ids:
+            raise ValueError("legacy analysis projection is unavailable; sync must be restarted")
         referenced_record_ids = tuple(
             dict.fromkeys(change_set.record_ids + change_set.projection_record_ids)
         )

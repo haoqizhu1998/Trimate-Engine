@@ -373,6 +373,33 @@ class AutomaticTrainingLoopTests(unittest.TestCase):
         self.assertEqual(len(current_ids), 2)
         self.assertIn(existing.changed_record_ids[0], current_ids)
 
+    def test_batch_source_mismatch_fails_without_raw_or_canonical_mutation(self) -> None:
+        self.add_profile()
+        self.add_subscription("watch")
+        connector = MutableConnector(
+            "watch",
+            (
+                _record(
+                    "other-source",
+                    "check-in",
+                    "mismatched-source",
+                    occurred_at=datetime(2026, 10, 26, 8, 0, tzinfo=UTC),
+                    pain=0,
+                ),
+            ),
+        )
+
+        result = self.loop({"watch": connector}).run_once(limit=1)
+
+        run = self.automation.latest_sync_run("athlete-001", "watch")
+        assert run is not None
+        self.assertEqual((result.completed, result.failed), (0, 1))
+        self.assertEqual(run.status, "failed")
+        self.assertEqual(self.records.list_current("athlete-001"), [])
+        self.assertEqual(self.table_count("data_change_sets"), 0)
+        raw_root = self.root / "raw" / "athlete-001"
+        self.assertFalse(raw_root.exists() and any(raw_root.rglob("*.json")))
+
     def test_notification_modes_delivery_and_retry_are_durable(self) -> None:
         connectors = {}
         cases = {
@@ -557,6 +584,110 @@ class AutomaticTrainingLoopTests(unittest.TestCase):
 
         self.assertEqual(len(sink.delivered), 1)
         self.assertEqual(sum(item.delivered for item in summaries), 1)
+
+    def test_delivery_claims_each_notification_just_in_time(self) -> None:
+        connectors = {}
+        for athlete_id in ("athlete-a", "athlete-b"):
+            source = f"source-{athlete_id}"
+            self.add_profile(athlete_id)
+            self.add_subscription(source, athlete_id=athlete_id)
+            connectors[source] = MutableConnector(
+                source,
+                (
+                    _record(
+                        source,
+                        "check-in",
+                        athlete_id,
+                        occurred_at=datetime(2026, 10, 26, 8, 0, tzinfo=UTC),
+                        pain=0,
+                    ),
+                ),
+            )
+        self.loop(connectors).run_once(limit=2, delivery_limit=2)
+        self.clock.now = datetime(2026, 10, 26, 15, 0, tzinfo=UTC)
+
+        parent_clock = self.clock
+
+        class AdvancingReceiptRepository(SQLiteAutomationRepository):
+            advanced = False
+
+            def mark_delivered(self, *args, **kwargs):
+                receipt = super().mark_delivered(*args, **kwargs)
+                if not self.advanced:
+                    self.advanced = True
+                    parent_clock.now += timedelta(minutes=6)
+                return receipt
+
+        delivery_repository = AdvancingReceiptRepository(self.database_file)
+        sink = RecordingSink()
+        loop = AutomaticTrainingLoop(
+            automation_repository=delivery_repository,
+            record_store=SQLiteRecordStore(self.database_file),
+            profile_repository=self.profiles,
+            connectors={},
+            raw_root=self.root / "raw",
+            notification_sink=sink,
+            clock=self.clock,
+            owner="just-in-time-delivery",
+            lease_duration=timedelta(minutes=5),
+        )
+
+        summary = loop.deliver_pending(limit=2)
+
+        self.assertEqual((summary.attempted, summary.delivered, summary.failed), (2, 2, 0))
+        self.assertEqual(len({item.notification_id for item in sink.delivered}), 2)
+        self.assertTrue(
+            all(
+                notification.delivered_at is not None
+                for athlete_id in ("athlete-a", "athlete-b")
+                for notification in delivery_repository.list_unread(athlete_id)
+            )
+        )
+
+    def test_expired_delivery_claim_is_rejected_before_sink_call(self) -> None:
+        self.add_profile()
+        self.add_subscription("watch")
+        connector = MutableConnector(
+            "watch",
+            (
+                _record(
+                    "watch",
+                    "check-in",
+                    "expires-before-delivery",
+                    occurred_at=datetime(2026, 10, 26, 8, 0, tzinfo=UTC),
+                    pain=0,
+                ),
+            ),
+        )
+        self.loop({"watch": connector}).run_once(limit=1)
+        self.clock.now = datetime(2026, 10, 26, 15, 0, tzinfo=UTC)
+        parent_clock = self.clock
+
+        class ExpiringRepository(SQLiteAutomationRepository):
+            def renew_delivery_claim(self, *args, **kwargs):
+                parent_clock.now += timedelta(minutes=6)
+                return super().renew_delivery_claim(*args, **kwargs)
+
+        repository = ExpiringRepository(self.database_file)
+        sink = RecordingSink()
+        loop = AutomaticTrainingLoop(
+            automation_repository=repository,
+            record_store=SQLiteRecordStore(self.database_file),
+            profile_repository=self.profiles,
+            connectors={},
+            raw_root=self.root / "raw",
+            notification_sink=sink,
+            clock=self.clock,
+            owner="expiring-delivery-worker",
+            lease_duration=timedelta(minutes=5),
+        )
+
+        summary = loop.deliver_pending(limit=1)
+
+        notification = repository.list_unread("athlete-001")[0]
+        self.assertEqual((summary.attempted, summary.delivered, summary.failed), (1, 0, 1))
+        self.assertEqual(sink.delivered, [])
+        self.assertIsNone(notification.delivered_at)
 
     def test_highest_risk_daily_snapshot_drives_one_immediate_notification(self) -> None:
         self.add_profile()
@@ -808,7 +939,7 @@ class AutomaticTrainingLoopTests(unittest.TestCase):
             )
             finished.set()
 
-        staging_root = self.root / "staging"
+        staging_root = self.root / "raw" / "athlete-001" / ".test-staging"
         self.clock.now += timedelta(minutes=6)
         with transaction(
             claimed.run_id,
@@ -970,7 +1101,7 @@ class AutomaticTrainingLoopTests(unittest.TestCase):
         original_stage = IngestionService._stage_raw_file
         staging_directories: list[Path] = []
 
-        def observe_staging(destination, payload, source, digest, *, raw_staging_dir):
+        def observe_staging(destination, payload, source, digest, *, raw_root, raw_staging_dir):
             assert raw_staging_dir is not None
             staging_directories.append(raw_staging_dir)
             return original_stage(
@@ -978,6 +1109,7 @@ class AutomaticTrainingLoopTests(unittest.TestCase):
                 payload,
                 source,
                 digest,
+                raw_root=raw_root,
                 raw_staging_dir=raw_staging_dir,
             )
 
@@ -992,7 +1124,10 @@ class AutomaticTrainingLoopTests(unittest.TestCase):
         self.assertEqual((result.completed, result.failed), (1, 0))
         self.assertTrue(staging_directories)
         self.assertTrue(
-            all(directory.parent == athlete_raw_root for directory in staging_directories)
+            all(
+                directory.parent.resolve() == athlete_raw_root.resolve()
+                for directory in staging_directories
+            )
         )
         self.assertTrue(
             all(directory.name.startswith(".staging-") for directory in staging_directories)
@@ -1486,6 +1621,7 @@ class AutomaticTrainingLoopTests(unittest.TestCase):
             ingestion_result,
             created_at=self.clock(),
             lease_token=crashed_run.lease_token,
+            projection_record_ids=self.records.list_current_ids("athlete-001"),
         )
         self.clock.now += timedelta(minutes=2)
 
@@ -1499,6 +1635,48 @@ class AutomaticTrainingLoopTests(unittest.TestCase):
         self.assertEqual(len(self.automation.list_unread("athlete-001")), 1)
         self.assertEqual(connector.windows, [SyncWindow(date(2026, 10, 24), date(2026, 10, 26))])
         self.assertEqual(change_set.run_id, crashed_run.run_id)
+
+    def test_recovery_fails_safely_when_legacy_projection_is_unavailable(self) -> None:
+        self.add_profile()
+        self.add_subscription("watch")
+        connector = MutableConnector(
+            "watch",
+            (
+                _record(
+                    "watch",
+                    "check-in",
+                    "legacy-without-watermark",
+                    occurred_at=datetime(2026, 10, 26, 8, 0, tzinfo=UTC),
+                    pain=0,
+                ),
+            ),
+        )
+        crashed_run = self.automation.claim_due(
+            self.clock(),
+            owner="legacy-worker",
+            lease_duration=timedelta(minutes=1),
+        )[0][1]
+        assert crashed_run.lease_token is not None
+        ingestion_result = IngestionService(
+            athlete_id="athlete-001",
+            store=self.records,
+            raw_dir=self.root / "raw" / "athlete-001",
+        ).sync(connector, SyncWindow(date(2026, 10, 24), date(2026, 10, 26)))
+        self.automation.save_change_set(
+            crashed_run.run_id,
+            ingestion_result,
+            created_at=self.clock(),
+            lease_token=crashed_run.lease_token,
+        )
+        self.clock.now += timedelta(minutes=2)
+
+        result = self.loop({}).run_once(limit=1)
+
+        failed_run = self.automation.get_sync_run(crashed_run.run_id)
+        assert failed_run is not None
+        self.assertEqual((result.recovered, result.completed, result.failed), (1, 0, 1))
+        self.assertEqual(failed_run.status, "failed")
+        self.assertEqual(self.automation.list_snapshots("athlete-001"), [])
 
     def test_recovery_after_notification_keeps_original_digest_schedule(self) -> None:
         self.add_profile()

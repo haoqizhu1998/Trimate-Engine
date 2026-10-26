@@ -71,20 +71,50 @@ class ReportServiceTests(unittest.TestCase):
     def test_weekly_spring_dst_window_excludes_previous_local_date(self) -> None:
         with TemporaryDirectory() as directory:
             store = SQLiteRecordStore(Path(directory) / "athlete.sqlite3")
-            store.save(
-                CanonicalRecord.create(
-                    athlete_id="athlete-001",
-                    kind="check-in",
-                    occurred_at=datetime(2026, 3, 4, 4, 30, tzinfo=UTC),
-                    data={"pain": 0},
+            for occurred_at, load in (
+                (datetime(2026, 3, 4, 4, 30, tzinfo=UTC), 99),
+                (datetime(2026, 3, 4, 5, 30, tzinfo=UTC), 11),
+            ):
+                store.save(
+                    CanonicalRecord.create(
+                        athlete_id="athlete-001",
+                        kind="activity",
+                        occurred_at=occurred_at,
+                        data={"training_load": load, "duration_min": 30},
+                    )
                 )
-            )
             reports = service.ReportService("athlete-001", store, timezone_name="America/New_York")
 
             report = reports.weekly(date(2026, 3, 10))
 
         self.assertEqual(report.period, "2026-03-04/2026-03-10")
-        self.assertEqual(report.objective["check_in_days"], 0)
+        self.assertEqual(report.objective["activity_count"], 1)
+        self.assertEqual(report.analytics.metrics["sessions_7d"], 1)
+        self.assertEqual(report.analytics.metrics["acute_load"], 11)
+
+    def test_weekly_fall_dst_window_includes_first_local_hour_consistently(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = SQLiteRecordStore(Path(directory) / "athlete.sqlite3")
+            for occurred_at, load in (
+                (datetime(2026, 10, 29, 3, 30, tzinfo=UTC), 99),
+                (datetime(2026, 10, 29, 4, 30, tzinfo=UTC), 13),
+            ):
+                store.save(
+                    CanonicalRecord.create(
+                        athlete_id="athlete-001",
+                        kind="activity",
+                        occurred_at=occurred_at,
+                        data={"training_load": load, "duration_min": 30},
+                    )
+                )
+            reports = service.ReportService("athlete-001", store, timezone_name="America/New_York")
+
+            report = reports.weekly(date(2026, 11, 4))
+
+        self.assertEqual(report.period, "2026-10-29/2026-11-04")
+        self.assertEqual(report.objective["activity_count"], 1)
+        self.assertEqual(report.analytics.metrics["sessions_7d"], 1)
+        self.assertEqual(report.analytics.metrics["acute_load"], 13)
 
 
 if __name__ == "__main__":

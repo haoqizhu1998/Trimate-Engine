@@ -12,14 +12,26 @@ from athlete_growth.domain.records import CanonicalRecord
 class TrainingAnalytics:
     algorithm_version = "training-analytics/1.0"
 
-    def analyze(self, records: list[CanonicalRecord], *, as_of: datetime) -> AnalysisResult:
+    def analyze(
+        self,
+        records: list[CanonicalRecord],
+        *,
+        as_of: datetime,
+        history_start: datetime | None = None,
+        acute_start: datetime | None = None,
+    ) -> AnalysisResult:
+        self._require_aware(as_of, "as_of")
+        history_boundary = history_start or as_of - timedelta(days=28)
+        acute_boundary = acute_start or as_of - timedelta(days=7)
+        self._require_aware(history_boundary, "history_start")
+        self._require_aware(acute_boundary, "acute_start")
+        if history_boundary > acute_boundary or acute_boundary > as_of:
+            raise ValueError("analysis window boundaries must be ordered")
         window_records = [
-            record
-            for record in records
-            if as_of - timedelta(days=28) <= record.occurred_at <= as_of
+            record for record in records if history_boundary <= record.occurred_at <= as_of
         ]
         activities = [record for record in window_records if record.kind == "activity"]
-        acute = [record for record in activities if record.occurred_at >= as_of - timedelta(days=7)]
+        acute = [record for record in activities if record.occurred_at >= acute_boundary]
         acute_load = sum(self._load(record) for record in acute)
         chronic_total = sum(self._load(record) for record in activities)
         has_baseline_span = bool(activities) and min(
@@ -120,6 +132,11 @@ class TrainingAnalytics:
             round(confidence, 2),
             self.algorithm_version,
         )
+
+    @staticmethod
+    def _require_aware(value: datetime, field_name: str) -> None:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError(f"{field_name} must be timezone-aware")
 
     @staticmethod
     def _load(record: CanonicalRecord) -> float:

@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
 from athlete_growth.application.automation.models import (
+    LEGACY_PROJECTION_UNAVAILABLE,
     AnalysisSnapshot,
     DataChangeSet,
     NotificationMode,
@@ -358,7 +359,14 @@ class SQLiteAutomationRepository:
                     row["affected_dates_json"],
                     row["projection_record_ids_json"]
                     if "projection_record_ids_json" in change_set_columns
-                    else row["record_ids_json"],
+                    else json.dumps(
+                        cls._reconstruct_legacy_projection(
+                            connection,
+                            tables,
+                            athlete_id=row["athlete_id"],
+                        ),
+                        ensure_ascii=False,
+                    ),
                     row["created_at"],
                 ),
             )
@@ -385,6 +393,7 @@ class SQLiteAutomationRepository:
                     row["created_at"],
                 ),
             )
+
         notification_columns = source_columns["notification_inbox"]
         for row in source_rows["notification_inbox"]:
             connection.execute(
@@ -440,6 +449,31 @@ class SQLiteAutomationRepository:
                     END
                     """
                 )
+
+    @classmethod
+    def _reconstruct_legacy_projection(
+        cls,
+        connection: sqlite3.Connection,
+        tables: set[str],
+        *,
+        athlete_id: str,
+    ) -> tuple[str, ...]:
+        """Rebuild a legacy watermark without mistaking changed IDs for a projection."""
+
+        if "canonical_records" not in tables:
+            return (LEGACY_PROJECTION_UNAVAILABLE,)
+        required_columns = {"record_id", "athlete_id", "is_current"}
+        if not required_columns <= cls._table_columns(connection, "canonical_records"):
+            raise ValueError("canonical record schema cannot reconstruct legacy projection")
+        rows = connection.execute(
+            """
+            SELECT record_id FROM canonical_records
+            WHERE athlete_id = ? AND is_current = 1
+            ORDER BY record_id
+            """,
+            (athlete_id,),
+        ).fetchall()
+        return tuple(row["record_id"] for row in rows)
 
     @classmethod
     def _normalize_legacy_run(
@@ -1297,7 +1331,7 @@ class SQLiteAutomationRepository:
             affected_dates=tuple(result.affected_dates),
             created_at=created,
             projection_record_ids=(
-                tuple(result.changed_record_ids)
+                (LEGACY_PROJECTION_UNAVAILABLE,)
                 if projection_record_ids is None
                 else projection_record_ids
             ),
@@ -1748,11 +1782,12 @@ class SQLiteAutomationRepository:
         owner: str,
         lease_duration: timedelta = timedelta(minutes=5),
         limit: int = 100,
+        lease_clock: Callable[[], datetime] | None = None,
     ) -> list[UserNotification]:
         """Atomically lease a bounded, fair batch of due notification deliveries."""
 
-        claimed_at = self._datetime(now, "now")
-        lease_expires_at = self._lease_expiry(claimed_at, lease_duration)
+        fallback_now = self._datetime(now, "now")
+        self._lease_expiry(fallback_now, lease_duration)
         if not owner.strip():
             raise ValueError("owner must not be blank")
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
@@ -1760,6 +1795,8 @@ class SQLiteAutomationRepository:
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
+            claimed_at = self._lease_time(lease_clock, fallback_now, "now")
+            lease_expires_at = self._lease_expiry(claimed_at, lease_duration)
             rows = connection.execute(
                 """
                 SELECT notification_id FROM notification_inbox
@@ -1806,8 +1843,71 @@ class SQLiteAutomationRepository:
                 ).fetchone()
                 assert claimed_row is not None
                 claimed.append(self._notification_from_row(claimed_row))
+            commit_at = self._lease_time(lease_clock, fallback_now, "now")
+            if claimed and lease_expires_at <= commit_at:
+                raise ValueError("notification delivery claim expired before commit")
             connection.commit()
             return claimed
+        except BaseException:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def renew_delivery_claim(
+        self,
+        notification_id: str,
+        *,
+        lease_token: str,
+        owner: str,
+        now: datetime,
+        lease_duration: timedelta = timedelta(minutes=5),
+        lease_clock: Callable[[], datetime] | None = None,
+    ) -> UserNotification:
+        """Validate and refresh one claim immediately before external delivery."""
+
+        fallback_now = self._datetime(now, "now")
+        self._lease_expiry(fallback_now, lease_duration)
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            renewed_at = self._lease_time(lease_clock, fallback_now, "now")
+            row = connection.execute(
+                "SELECT * FROM notification_inbox WHERE notification_id = ?",
+                (notification_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(notification_id)
+            existing = self._notification_from_row(row)
+            self._validate_delivery_claim(existing, lease_token, owner, renewed_at)
+            lease_expires_at = self._lease_expiry(renewed_at, lease_duration)
+            cursor = connection.execute(
+                """
+                UPDATE notification_inbox
+                SET delivery_lease_expires_at = ?
+                WHERE notification_id = ? AND delivered_at IS NULL
+                  AND delivery_lease_token = ? AND delivery_lease_owner = ?
+                """,
+                (
+                    lease_expires_at.isoformat(),
+                    notification_id,
+                    lease_token,
+                    owner,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("notification delivery lease conflict")
+            row = connection.execute(
+                "SELECT * FROM notification_inbox WHERE notification_id = ?",
+                (notification_id,),
+            ).fetchone()
+            assert row is not None
+            renewed = self._notification_from_row(row)
+            commit_at = self._lease_time(lease_clock, fallback_now, "now")
+            self._validate_delivery_claim(renewed, lease_token, owner, commit_at)
+            connection.commit()
+            return renewed
         except BaseException:
             if connection.in_transaction:
                 connection.rollback()

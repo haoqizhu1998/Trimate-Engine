@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Literal, Protocol
 
+from athlete_growth.domain.identifiers import require_safe_component
 from athlete_growth.domain.records import JsonValue
 
 
@@ -31,9 +32,7 @@ class SourceCapabilities:
         if self.suggested_poll_minutes <= 0:
             raise ValueError("suggested_poll_minutes must be positive")
         if self.delivery_mode != "poll":
-            raise ValueError(
-                "only poll sources may declare suggested_poll_minutes"
-            )
+            raise ValueError("only poll sources may declare suggested_poll_minutes")
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,6 +55,7 @@ class RawSourceRecord:
     canonical_payload: dict[str, JsonValue] | None = None
 
     def __post_init__(self) -> None:
+        require_safe_component(self.source, "source")
         if self.occurred_at.tzinfo is None or self.occurred_at.utcoffset() is None:
             raise ValueError("occurred_at must be timezone-aware")
 

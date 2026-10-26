@@ -9,7 +9,10 @@ from datetime import date, datetime
 from enum import StrEnum
 from typing import cast, overload
 
+from athlete_growth.domain.identifiers import require_safe_component
 from athlete_growth.domain.records import JsonValue
+
+LEGACY_PROJECTION_UNAVAILABLE = "__legacy_projection_unavailable__"
 
 
 class NotificationMode(StrEnum):
@@ -181,8 +184,8 @@ class SyncSubscription:
     enabled: bool
 
     def __post_init__(self) -> None:
-        _require_text(self.athlete_id, "athlete_id")
-        _require_text(self.source, "source")
+        require_safe_component(self.athlete_id, "athlete_id")
+        require_safe_component(self.source, "source")
         _require_positive_int(self.interval_minutes, "interval_minutes")
         _require_positive_int(self.lookback_days, "lookback_days")
         if not isinstance(self.notification_mode, NotificationMode):

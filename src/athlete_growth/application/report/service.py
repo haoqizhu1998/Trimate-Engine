@@ -58,8 +58,16 @@ class ReportService:
         history_start = datetime.combine(
             calendar_date - timedelta(days=27), time.min, tzinfo=self.timezone
         ).astimezone(UTC)
+        acute_start = datetime.combine(
+            calendar_date - timedelta(days=6), time.min, tzinfo=self.timezone
+        ).astimezone(UTC)
         history = self._records(start=history_start, end=end)
-        analytics = self.analytics.analyze(history, as_of=end)
+        analytics = self.analytics.analyze(
+            history,
+            as_of=end,
+            history_start=history_start,
+            acute_start=acute_start,
+        )
         safety = self.safety_rules.assess(
             check_in=check_in,
             observations=objective_records,
@@ -101,6 +109,8 @@ class ReportService:
         analytics = self.analytics.analyze(
             self._records(start=history_start, end=end),
             as_of=end,
+            history_start=history_start,
+            acute_start=start,
         )
         latest_check_in = next(
             (record for record in reversed(records) if record.kind == "check-in"), None

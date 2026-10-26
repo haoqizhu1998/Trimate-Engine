@@ -15,6 +15,75 @@ from athlete_growth.ports import data_source
 
 
 class IngestionTests(unittest.TestCase):
+    def test_raw_source_rejects_unsafe_path_components(self) -> None:
+        for source in (".", "..", "../escaped", "/absolute", "nested/source", r"nested\source"):
+            with self.subTest(source=source), self.assertRaisesRegex(ValueError, "source"):
+                data_source.RawSourceRecord(
+                    source=source,
+                    kind="activity",
+                    source_id="run-1",
+                    occurred_at=datetime(2026, 10, 26, 8, 0, tzinfo=UTC),
+                    payload={"duration_min": 30},
+                )
+
+    def test_ingestion_rejects_staging_outside_raw_root_without_writing(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            raw_root = root / "raw"
+            outside = root / "outside-staging"
+            ingestion = service.IngestionService(
+                athlete_id="athlete-001",
+                store=SQLiteRecordStore(root / "athlete.sqlite3"),
+                raw_dir=raw_root,
+            )
+            batch = data_source.SyncBatch(
+                (
+                    data_source.RawSourceRecord(
+                        source="file",
+                        kind="activity",
+                        source_id="run-1",
+                        occurred_at=datetime(2026, 10, 26, 8, 0, tzinfo=UTC),
+                        payload={"duration_min": 30},
+                    ),
+                )
+            )
+
+            with self.assertRaisesRegex(ValueError, "raw root"):
+                ingestion.ingest(batch, raw_staging_dir=outside)
+
+            self.assertFalse(outside.exists())
+            self.assertFalse(raw_root.exists())
+
+    def test_ingestion_rejects_source_symlink_escape_without_writing(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            raw_root = root / "raw"
+            outside = root / "outside"
+            raw_root.mkdir()
+            outside.mkdir()
+            (raw_root / "file").symlink_to(outside, target_is_directory=True)
+            ingestion = service.IngestionService(
+                athlete_id="athlete-001",
+                store=SQLiteRecordStore(root / "athlete.sqlite3"),
+                raw_dir=raw_root,
+            )
+            batch = data_source.SyncBatch(
+                (
+                    data_source.RawSourceRecord(
+                        source="file",
+                        kind="activity",
+                        source_id="run-1",
+                        occurred_at=datetime(2026, 10, 26, 8, 0, tzinfo=UTC),
+                        payload={"duration_min": 30},
+                    ),
+                )
+            )
+
+            with self.assertRaisesRegex(ValueError, "raw root"):
+                ingestion.ingest(batch)
+
+            self.assertEqual(list(outside.rglob("*.json")), [])
+
     def test_syncs_long_ranges_in_restart_safe_chunks(self) -> None:
         class RecordingConnector:
             def __init__(self) -> None:

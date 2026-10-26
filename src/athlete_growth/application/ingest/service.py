@@ -14,6 +14,7 @@ from time import sleep
 from zoneinfo import ZoneInfo
 
 from athlete_growth.adapters.storage.sqlite_records import SQLiteRecordStore
+from athlete_growth.domain.identifiers import require_strict_child
 from athlete_growth.domain.records import CanonicalRecord, EvidenceRef, JsonValue
 from athlete_growth.ports.data_source import (
     DataSourceConnector,
@@ -64,6 +65,8 @@ class IngestionService:
         connection: sqlite3.Connection | None = None,
         raw_staging_dir: Path | None = None,
     ) -> IngestionResult:
+        if raw_staging_dir is not None:
+            require_strict_child(self.raw_dir, raw_staging_dir, "raw staging directory")
         inserted = 0
         updated = 0
         retired = 0
@@ -94,6 +97,7 @@ class IngestionService:
                 payload_bytes,
                 raw.source,
                 digest,
+                raw_root=self.raw_dir,
                 raw_staging_dir=raw_staging_dir,
             )
             raw_files += int(raw_created)
@@ -197,8 +201,10 @@ class IngestionService:
         source: str,
         digest: str,
         *,
+        raw_root: Path,
         raw_staging_dir: Path | None,
     ) -> tuple[bool, Path | None]:
+        require_strict_child(raw_root, destination, "raw destination")
         if destination.exists():
             return False, None
         target = (
@@ -206,6 +212,7 @@ class IngestionService:
             if raw_staging_dir is None
             else raw_staging_dir / source / digest[:2] / destination.name
         )
+        require_strict_child(raw_root, target, "raw staging target")
         target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(target.parent, 0o700)
         if target.exists():

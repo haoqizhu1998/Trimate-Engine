@@ -11,10 +11,11 @@ from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from threading import Barrier
+from threading import Barrier, Event
 from typing import Any, cast
 
 from athlete_growth.adapters.storage.sqlite_automation import SQLiteAutomationRepository
+from athlete_growth.adapters.storage.sqlite_records import SQLiteRecordStore
 from athlete_growth.application.automation import (
     AnalysisSnapshot,
     NotificationMode,
@@ -22,7 +23,8 @@ from athlete_growth.application.automation import (
     UserNotification,
 )
 from athlete_growth.application.ingest.service import IngestionResult
-from athlete_growth.domain.records import JsonValue
+from athlete_growth.application.report.service import ReportService
+from athlete_growth.domain.records import CanonicalRecord, JsonValue
 
 
 def _seed_v1_database(database_file: Path, *, invalid_run: bool = False) -> None:
@@ -543,7 +545,10 @@ class SQLiteAutomationRepositoryTests(unittest.TestCase):
                 "notification-policy/1.0",
             )
             self.assertEqual(notifications[0].channel, "inbox")
-            self.assertEqual(change_set.projection_record_ids, ("record-v1",))
+            self.assertEqual(
+                change_set.projection_record_ids,
+                ("__legacy_projection_unavailable__",),
+            )
             self.assertEqual(
                 notifications[0].next_attempt_at,
                 notifications[0].created_at,
@@ -604,6 +609,44 @@ class SQLiteAutomationRepositoryTests(unittest.TestCase):
             self.assertIn("completed_at >= started_at", run_ddl)
             self.assertEqual(foreign_key_errors, [])
             self.assertEqual(backup_run_count, 1)
+
+    def test_legacy_migration_reconstructs_full_current_projection(self) -> None:
+        with TemporaryDirectory() as directory:
+            database_file = Path(directory) / "athlete.sqlite3"
+            records = SQLiteRecordStore(database_file)
+            current = tuple(
+                CanonicalRecord.create(
+                    athlete_id="athlete-001",
+                    kind="activity",
+                    occurred_at=self.now - timedelta(days=days_ago),
+                    data={"training_load": load, "duration_min": 30},
+                )
+                for days_ago, load in ((0, 10), (1, 20))
+            )
+            for record in current:
+                records.save(record)
+            _seed_v1_database(database_file)
+            with closing(sqlite3.connect(database_file)) as connection:
+                connection.execute(
+                    "UPDATE data_change_sets SET record_ids_json = ? WHERE change_set_id = ?",
+                    (f'["{current[0].record_id}"]', "change-v1"),
+                )
+                connection.commit()
+
+            repository = SQLiteAutomationRepository(database_file)
+            change_set = repository.get_change_set_for_run("run-v1")
+            assert change_set is not None
+            recovered_report = ReportService(
+                "athlete-001",
+                records,
+                projection_record_ids=change_set.projection_record_ids,
+            ).weekly(self.now.date())
+
+            self.assertEqual(
+                change_set.projection_record_ids,
+                tuple(sorted(record.record_id for record in current)),
+            )
+            self.assertEqual(recovered_report.analytics.metrics["sessions_7d"], 2)
 
     def test_invalid_v1_run_aborts_migration_without_partial_schema(self) -> None:
         with TemporaryDirectory() as directory:
@@ -1178,6 +1221,59 @@ class SQLiteAutomationRepositoryTests(unittest.TestCase):
             self.assertTrue(all(item.delivery_lease_token for item in first_claim))
             self.assertTrue(all(item.delivery_lease_owner == "delivery-a" for item in first_claim))
 
+    def test_pending_claim_uses_authoritative_clock_after_database_lock(self) -> None:
+        with TemporaryDirectory() as directory:
+            database_file = Path(directory) / "athlete.sqlite3"
+            repository = SQLiteAutomationRepository(database_file)
+            self.seed_notifications(repository, count=1)
+            authoritative = [self.now]
+            started = Event()
+
+            def claim_after_signal():
+                started.set()
+                return repository.claim_pending(
+                    self.now,
+                    owner="delivery-worker",
+                    lease_duration=timedelta(minutes=1),
+                    limit=1,
+                    lease_clock=lambda: authoritative[0],
+                )
+
+            with closing(sqlite3.connect(database_file)) as blocker:
+                blocker.execute("BEGIN IMMEDIATE")
+                with ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(claim_after_signal)
+                    self.assertTrue(started.wait(1))
+                    authoritative[0] = self.now + timedelta(minutes=10)
+                    blocker.commit()
+                    claimed = future.result(timeout=2)[0]
+
+            self.assertEqual(
+                claimed.delivery_lease_expires_at,
+                authoritative[0] + timedelta(minutes=1),
+            )
+
+    def test_pending_claim_rolls_back_if_authoritative_clock_expires_before_commit(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as directory:
+            repository = SQLiteAutomationRepository(Path(directory) / "athlete.sqlite3")
+            self.seed_notifications(repository, count=1)
+            readings = iter((self.now, self.now + timedelta(minutes=2)))
+
+            with self.assertRaisesRegex(ValueError, "expired"):
+                repository.claim_pending(
+                    self.now,
+                    owner="delivery-worker",
+                    lease_duration=timedelta(minutes=1),
+                    limit=1,
+                    lease_clock=lambda: next(readings),
+                )
+
+            pending = repository.list_pending(self.now)
+            self.assertEqual(len(pending), 1)
+            self.assertIsNone(pending[0].delivery_lease_token)
+
     def test_expired_delivery_claim_is_reclaimed_and_stale_receipt_is_rejected(self) -> None:
         with TemporaryDirectory() as directory:
             database_file = Path(directory) / "athlete.sqlite3"
@@ -1336,6 +1432,16 @@ class SQLiteAutomationRepositoryTests(unittest.TestCase):
 
     def test_models_reject_invalid_values_and_naive_datetimes(self) -> None:
         invalid_subscription_values = (
+            {"athlete_id": "../escaped"},
+            {"athlete_id": "/absolute"},
+            {"athlete_id": "nested/athlete"},
+            {"athlete_id": r"nested\athlete"},
+            {"source": "."},
+            {"source": ".."},
+            {"source": "../escaped"},
+            {"source": "/absolute"},
+            {"source": "nested/source"},
+            {"source": r"nested\source"},
             {"interval_minutes": 0},
             {"interval_minutes": "30"},
             {"lookback_days": 0},

@@ -90,6 +90,31 @@ class TrainingAnalyticsTests(unittest.TestCase):
 
         self.assertEqual(result.metrics["high_intensity_pct"], 100.0)
 
+    def test_explicit_calendar_bounds_override_absolute_day_windows(self) -> None:
+        as_of = datetime(2026, 3, 11, 3, 59, tzinfo=UTC)
+        outside_acute = CanonicalRecord.create(
+            athlete_id="athlete-001",
+            kind="activity",
+            occurred_at=datetime(2026, 3, 4, 4, 30, tzinfo=UTC),
+            data={"training_load": 99},
+        )
+        inside_acute = CanonicalRecord.create(
+            athlete_id="athlete-001",
+            kind="activity",
+            occurred_at=datetime(2026, 3, 4, 5, 30, tzinfo=UTC),
+            data={"training_load": 11},
+        )
+
+        result = service.TrainingAnalytics().analyze(
+            [outside_acute, inside_acute],
+            as_of=as_of,
+            history_start=datetime(2026, 2, 12, 5, 0, tzinfo=UTC),
+            acute_start=datetime(2026, 3, 4, 5, 0, tzinfo=UTC),
+        )
+
+        self.assertEqual(result.metrics["sessions_7d"], 1)
+        self.assertEqual(result.metrics["acute_load"], 11)
+
 
 if __name__ == "__main__":
     unittest.main()
