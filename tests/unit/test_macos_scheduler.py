@@ -91,7 +91,11 @@ class MacOSLaunchdSchedulerTests(unittest.TestCase):
             run.call_args_list,
             [
                 call(
-                    ["/bin/launchctl", "bootout", "gui/501", str(plist_path)],
+                    [
+                        "/bin/launchctl",
+                        "bootout",
+                        "gui/501/com.athlete-growth.automation",
+                    ],
                     check=False,
                     shell=False,
                     timeout=7,
@@ -108,6 +112,42 @@ class MacOSLaunchdSchedulerTests(unittest.TestCase):
                 ),
             ],
         )
+
+    @patch("athlete_growth.adapters.scheduler.macos.sys.platform", "darwin")
+    @patch("athlete_growth.adapters.scheduler.macos.subprocess.run")
+    def test_install_never_uses_path_form_bootout_that_returns_rc5(self, run) -> None:
+        path_form = [
+            "/bin/launchctl",
+            "bootout",
+            "gui/501",
+            str(self.scheduler.plist_path),
+        ]
+        service_form = [
+            "/bin/launchctl",
+            "bootout",
+            "gui/501/com.athlete-growth.automation",
+        ]
+
+        def launchctl_result(arguments, **_kwargs):
+            if arguments == path_form:
+                return self._result(
+                    5,
+                    stderr="Boot-out failed: 5: Input/output error\n",
+                )
+            if arguments == service_form:
+                return self._result(
+                    3,
+                    stderr="Boot-out failed: 3: No such process\n",
+                )
+            return self._result()
+
+        run.side_effect = launchctl_result
+
+        self.assertEqual(
+            self.scheduler.install(),
+            {"installed": True, "label": LABEL},
+        )
+        self.assertNotIn(path_form, [item.args[0] for item in run.call_args_list])
 
     @patch("athlete_growth.adapters.scheduler.macos.sys.platform", "darwin")
     @patch("athlete_growth.adapters.scheduler.macos.subprocess.run")
@@ -141,7 +181,11 @@ class MacOSLaunchdSchedulerTests(unittest.TestCase):
         self.assertTrue(unrelated.exists())
         self.assertEqual(result, {"installed": False, "label": LABEL})
         run.assert_called_once_with(
-            ["/bin/launchctl", "bootout", "gui/501", str(self.scheduler.plist_path)],
+            [
+                "/bin/launchctl",
+                "bootout",
+                "gui/501/com.athlete-growth.automation",
+            ],
             check=False,
             shell=False,
             timeout=7,
@@ -161,7 +205,11 @@ class MacOSLaunchdSchedulerTests(unittest.TestCase):
             {"installed": False, "label": LABEL},
         )
         run.assert_called_once_with(
-            ["/bin/launchctl", "bootout", "gui/501", str(self.scheduler.plist_path)],
+            [
+                "/bin/launchctl",
+                "bootout",
+                "gui/501/com.athlete-growth.automation",
+            ],
             check=False,
             shell=False,
             timeout=7,
@@ -219,8 +267,26 @@ class MacOSLaunchdSchedulerTests(unittest.TestCase):
         self.assertEqual(self.scheduler.plist_path.read_bytes(), previous)
         self.assertEqual(stat.S_IMODE(self.scheduler.plist_path.stat().st_mode), 0o640)
         self.assertEqual(
-            [item.args[0][1] for item in run.call_args_list],
-            ["bootout", "bootstrap", "bootstrap"],
+            [item.args[0] for item in run.call_args_list],
+            [
+                [
+                    "/bin/launchctl",
+                    "bootout",
+                    "gui/501/com.athlete-growth.automation",
+                ],
+                [
+                    "/bin/launchctl",
+                    "bootstrap",
+                    "gui/501",
+                    str(self.scheduler.plist_path),
+                ],
+                [
+                    "/bin/launchctl",
+                    "bootstrap",
+                    "gui/501",
+                    str(self.scheduler.plist_path),
+                ],
+            ],
         )
 
     @patch("athlete_growth.adapters.scheduler.macos.sys.platform", "darwin")

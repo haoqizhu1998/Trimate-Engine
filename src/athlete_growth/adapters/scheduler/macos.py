@@ -271,14 +271,14 @@ class MacOSLaunchdScheduler:
             raise
 
     def _launchctl(self, verb: str) -> subprocess.CompletedProcess[str]:
+        target = (
+            [f"gui/{self.uid}/{LABEL}"]
+            if verb == "bootout"
+            else [f"gui/{self.uid}", str(self.plist_path)]
+        )
         try:
             result = subprocess.run(
-                [
-                    _LAUNCHCTL,
-                    verb,
-                    f"gui/{self.uid}",
-                    str(self.plist_path),
-                ],
+                [_LAUNCHCTL, verb, *target],
                 check=False,
                 shell=False,
                 timeout=self.timeout_seconds,
