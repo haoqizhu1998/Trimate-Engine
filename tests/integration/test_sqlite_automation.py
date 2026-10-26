@@ -165,10 +165,12 @@ class SQLiteAutomationRepositoryTests(unittest.TestCase):
                 reason="schedule",
                 request_key="schedule-slot-001",
             )
+            assert run.lease_token is not None
             change_set = repository.save_change_set(
                 run.run_id,
                 self.result,
                 created_at=self.now,
+                lease_token=run.lease_token,
             )
             snapshot = repository.save_snapshot(
                 change_set,
@@ -200,11 +202,13 @@ class SQLiteAutomationRepositoryTests(unittest.TestCase):
                 reason="schedule",
                 request_key="schedule-slot-001",
             )
+            assert run.lease_token is not None
 
             first_change_set = repository.save_change_set(
                 run.run_id,
                 self.result,
                 created_at=self.now,
+                lease_token=run.lease_token,
             )
             replayed_change_set = repository.save_change_set(
                 run.run_id,
@@ -720,6 +724,121 @@ class SQLiteAutomationRepositoryTests(unittest.TestCase):
                 )
             self.assertEqual(repository.get_sync_run(claimed.run_id), renewed)
 
+    def test_change_set_first_write_is_fenced_by_the_current_lease_token(self) -> None:
+        with TemporaryDirectory() as directory:
+            repository = SQLiteAutomationRepository(Path(directory) / "athlete.sqlite3")
+            repository.save_subscription(self.subscription, next_run_at=self.now)
+            claimed = repository.claim_due(
+                self.now,
+                owner="worker-old",
+                lease_duration=timedelta(minutes=5),
+            )[0][1]
+            assert claimed.lease_token is not None
+            reclaimed = repository.reclaim_sync_run(
+                claimed.run_id,
+                now=self.now + timedelta(minutes=5),
+                owner="worker-new",
+                lease_duration=timedelta(minutes=10),
+            )
+            assert reclaimed.lease_token is not None
+
+            with self.assertRaisesRegex(ValueError, "lease token"):
+                repository.save_change_set(
+                    claimed.run_id,
+                    self.result,
+                    created_at=self.now + timedelta(minutes=6),
+                )
+            with self.assertRaisesRegex(ValueError, "lease token"):
+                repository.save_change_set(
+                    claimed.run_id,
+                    self.result,
+                    created_at=self.now + timedelta(minutes=6),
+                    lease_token=claimed.lease_token,
+                )
+            change_set = repository.save_change_set(
+                claimed.run_id,
+                self.result,
+                created_at=self.now + timedelta(minutes=6),
+                lease_token=reclaimed.lease_token,
+            )
+            self.assertEqual(change_set.run_id, claimed.run_id)
+
+    def test_change_set_cannot_be_first_written_after_new_owner_completes(self) -> None:
+        with TemporaryDirectory() as directory:
+            repository = SQLiteAutomationRepository(Path(directory) / "athlete.sqlite3")
+            repository.save_subscription(self.subscription, next_run_at=self.now)
+            claimed = repository.claim_due(
+                self.now,
+                owner="worker-old",
+                lease_duration=timedelta(minutes=5),
+            )[0][1]
+            assert claimed.lease_token is not None
+            reclaimed_at = self.now + timedelta(minutes=5)
+            reclaimed = repository.reclaim_sync_run(
+                claimed.run_id,
+                now=reclaimed_at,
+                owner="worker-new",
+                lease_duration=timedelta(minutes=10),
+            )
+            assert reclaimed.lease_token is not None
+            repository.complete_sync_run(
+                claimed.run_id,
+                completed_at=reclaimed_at + timedelta(minutes=1),
+                lease_token=reclaimed.lease_token,
+            )
+
+            with self.assertRaisesRegex(ValueError, "running"):
+                repository.save_change_set(
+                    claimed.run_id,
+                    self.result,
+                    created_at=reclaimed_at + timedelta(minutes=2),
+                    lease_token=claimed.lease_token,
+                )
+
+    def test_exact_change_set_replay_survives_completion_but_divergence_conflicts(self) -> None:
+        divergent_result = IngestionResult(
+            inserted=1,
+            updated=0,
+            retired=0,
+            duplicates=0,
+            raw_files=1,
+            changed_record_ids=("record-divergent",),
+            affected_dates=(self.now.date(),),
+        )
+        with TemporaryDirectory() as directory:
+            repository = SQLiteAutomationRepository(Path(directory) / "athlete.sqlite3")
+            repository.save_subscription(self.subscription, next_run_at=self.now)
+            run = repository.claim_due(
+                self.now,
+                owner="worker-a",
+                lease_duration=timedelta(minutes=10),
+            )[0][1]
+            assert run.lease_token is not None
+            first = repository.save_change_set(
+                run.run_id,
+                self.result,
+                created_at=self.now,
+                lease_token=run.lease_token,
+            )
+            repository.complete_sync_run(
+                run.run_id,
+                completed_at=self.now + timedelta(minutes=1),
+                lease_token=run.lease_token,
+            )
+
+            replay = repository.save_change_set(
+                run.run_id,
+                self.result,
+                created_at=self.now + timedelta(minutes=2),
+            )
+            self.assertEqual(replay, first)
+            with self.assertRaisesRegex(ValueError, "conflict"):
+                repository.save_change_set(
+                    run.run_id,
+                    divergent_result,
+                    created_at=self.now + timedelta(minutes=2),
+                )
+
     def test_terminal_run_updates_are_idempotent_and_cannot_be_overwritten(self) -> None:
         completed_at = self.now + timedelta(minutes=1)
         failed_at = self.now + timedelta(minutes=2)
@@ -795,10 +914,12 @@ class SQLiteAutomationRepositoryTests(unittest.TestCase):
                 reason="schedule",
                 request_key="schedule-slot-001",
             )
+            assert run.lease_token is not None
             change_set = repository.save_change_set(
                 run.run_id,
                 self.result,
                 created_at=self.now,
+                lease_token=run.lease_token,
             )
             snapshot = repository.save_snapshot(
                 change_set,

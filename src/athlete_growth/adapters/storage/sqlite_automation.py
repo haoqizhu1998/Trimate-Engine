@@ -1021,24 +1021,50 @@ class SQLiteAutomationRepository:
         result: IngestionResult,
         *,
         created_at: datetime,
+        lease_token: str | None = None,
     ) -> DataChangeSet:
-        run = self.get_sync_run(run_id)
-        if run is None:
-            raise KeyError(run_id)
         created = self._datetime(created_at, "created_at")
-        change_set = DataChangeSet(
-            change_set_id=self._identifier("change-set", run_id),
-            run_id=run_id,
-            athlete_id=run.athlete_id,
-            source=run.source,
-            record_ids=tuple(result.changed_record_ids),
-            affected_dates=tuple(result.affected_dates),
-            created_at=created,
-        )
-        with self._connection() as connection:
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            run_row = connection.execute(
+                "SELECT * FROM automation_sync_runs WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+            if run_row is None:
+                raise KeyError(run_id)
+            run = self._sync_run_from_row(run_row)
+            change_set = DataChangeSet(
+                change_set_id=self._identifier("change-set", run_id),
+                run_id=run_id,
+                athlete_id=run.athlete_id,
+                source=run.source,
+                record_ids=tuple(result.changed_record_ids),
+                affected_dates=tuple(result.affected_dates),
+                created_at=created,
+            )
+            row = connection.execute(
+                "SELECT * FROM data_change_sets WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+            if row is not None:
+                existing = self._change_set_from_row(row)
+                if (
+                    existing.athlete_id != change_set.athlete_id
+                    or existing.source != change_set.source
+                    or existing.record_ids != change_set.record_ids
+                    or existing.affected_dates != change_set.affected_dates
+                ):
+                    raise ValueError("change set idempotency conflict")
+                connection.commit()
+                return existing
+            if run.status != "running":
+                raise ValueError("sync run must be running to create a change set")
+            if run.lease_token != lease_token:
+                raise ValueError("sync run lease token conflict")
             connection.execute(
                 """
-                INSERT OR IGNORE INTO data_change_sets (
+                INSERT INTO data_change_sets (
                     change_set_id, run_id, athlete_id, source, record_ids_json,
                     affected_dates_json, created_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -1053,21 +1079,14 @@ class SQLiteAutomationRepository:
                     change_set.created_at.isoformat(),
                 ),
             )
-            row = connection.execute(
-                "SELECT * FROM data_change_sets WHERE run_id = ?",
-                (run_id,),
-            ).fetchone()
-        assert row is not None
-        existing = self._change_set_from_row(row)
-        if (
-            existing.run_id != change_set.run_id
-            or existing.athlete_id != change_set.athlete_id
-            or existing.source != change_set.source
-            or existing.record_ids != change_set.record_ids
-            or existing.affected_dates != change_set.affected_dates
-        ):
-            raise ValueError("change set idempotency conflict")
-        return existing
+            connection.commit()
+            return change_set
+        except BaseException:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        finally:
+            connection.close()
 
     def save_snapshot(
         self,
