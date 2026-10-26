@@ -37,7 +37,10 @@ Garmin/设备先把数据上传到产品可访问的来源
 ```bash
 python3 -m venv .venv
 .venv/bin/python -m pip install -e '.[dev]'
+. .venv/bin/activate
 ```
+
+激活后，本页后续的 `athlete-growth`、`python`、`ruff` 和 `pyright` 命令都会使用该虚拟环境。每次打开新的终端并进入项目目录后，都要重新运行 `. .venv/bin/activate`。
 
 私有数据目录建议放在源码仓之外。省略 `--data-home` 时，程序依次使用 `ATHLETE_GROWTH_HOME` 和 `~/.athlete-growth`：
 
@@ -86,7 +89,7 @@ athlete-growth automation-uninstall-macos
 
 - `actionable-digest`：中/高风险立即进入投递；低风险或未知风险延后到 `--digest-hour` 指定的个人资料本地小时。当前不承诺跨多个批次合并成一条摘要。
 - `all`：每个产生真实数据变化的批次都立即创建通知。
-- `off`：仍保存确定性分析快照，但本阶段不创建 Inbox 或系统通知。
+- `off`：仍保存确定性分析快照；在 `off` 期间产生的新分析不创建新通知，之前的 Inbox/历史和待投递项不会被删除，但待投递项在 `off` 期间不会发送。重新启用通知后，仍待投递且已到期的项目可以再次进入投递队列。
 
 没有真实数据变化时，三种策略都不会重复分析或通知。系统通知投递采用至少一次语义和指数退避；极少数情况下，macOS 已接受通知但进程来不及保存回执，恢复后可能重复显示一次。
 
@@ -119,11 +122,11 @@ Garmin 中国区连接器读取活动、每日汇总、步数、睡眠、HRV、�
 ## 验证
 
 ```bash
-PYTHONPATH=src python3 -m unittest discover -s tests -v
+PYTHONPATH=src python -m unittest discover -s tests -v
 ruff check src tests scripts
 pyright src
-python3 -m compileall -q src scripts
-PYTHONPATH=src python3 -m athlete_growth.interfaces.cli.main --help
+python -m compileall -q src scripts
+PYTHONPATH=src python -m athlete_growth.interfaces.cli.main --help
 ```
 
 测试使用合成 Fixture，不依赖个人真实数据。真实 Garmin 登录、网络可用性、通知权限和长时间后台稳定性必须在用户自己的环境中另行验收。

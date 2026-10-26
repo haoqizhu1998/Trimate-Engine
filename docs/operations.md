@@ -1,6 +1,6 @@
 # 自动同步运行手册
 
-本手册对应当前 CLI 的真实实现。示例默认使用 `~/.athlete-growth`；如果使用自定义保险库，请在每条命令末尾传同一个 `--data-home /path/to/private-vault`，或设置 `ATHLETE_GROWTH_HOME`。
+本手册对应当前 CLI 的真实实现。运行示例前先按 README 安装，并在每个新终端执行 `. .venv/bin/activate`。示例默认使用 `~/.athlete-growth`；如果使用自定义保险库，请在每条命令末尾传同一个 `--data-home /path/to/private-vault`，或设置 `ATHLETE_GROWTH_HOME`。
 
 ## 1. 首次准备
 
@@ -88,7 +88,7 @@ athlete-growth notification-read NOTIFICATION_ID
 
 - `actionable-digest`：选中的中/高风险快照立即可投递；低/未知风险通知排到下一次 `--digest-hour`。如果当天该小时已过，则排到次日。当前版本不做跨变化集摘要合并。
 - `all`：每个真实变化集创建一条立即可投递通知；一批变化只选择该批最需行动的快照生成通知。
-- `off`：同步和确定性分析照常执行，但不创建 Inbox 项，也不调用系统通知。
+- `off`：同步和确定性分析照常执行；`off` 期间产生的新分析不创建新通知。已有 Inbox/历史和待投递项会保留，不会被删除或取消，但外部投递在 `off` 期间被抑制；重新启用后，仍待投递且已到期的项目可以再次被领取。
 
 通知先持久化，再尝试外部投递。失败后按 1、2、4、8、16、32 分钟退避，之后封顶为每小时一次。投递是至少一次语义：如果 macOS 已接受通知，而进程在保存成功回执前崩溃，租约到期后可能重放一次。
 
@@ -144,7 +144,7 @@ tail -n 100 ~/.athlete-growth/logs/automation.stderr.log
 
 ### 收不到 macOS 系统通知
 
-先确认 `notification-list` 有项目、`automation-status` 的 `delivery_backlog` 是否为零，并检查错误日志。还需在 macOS 系统设置中允许当前 Python/终端相关进程显示通知。Inbox 是本地事实源；系统横幅缺失不表示分析快照丢失。
+先确认 `notification-list` 有项目、`automation-status` JSON 中的 `backlog.delivery_backlog` 是否为零，并检查错误日志。还需在 macOS 系统设置中允许当前 Python/终端相关进程显示通知。Inbox 是本地事实源；系统横幅缺失不表示分析快照丢失。若当前策略为 `off`，非零投递积压会保留但不会发送。
 
 ## 7. 私有文件位置
 

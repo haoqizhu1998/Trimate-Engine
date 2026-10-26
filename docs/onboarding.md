@@ -4,7 +4,7 @@
 
 理想体验是用户在熟悉的模型宿主里说“帮我连接训练数据并开启自动分析”，宿主逐步解释、调用本地引擎并展示结果。当前仓库已经有宿主无关的 JSON-safe Python facade 和完整 CLI，但还没有 GPT/Codex、WorkBuddy 或 Coze 的 MCP/Plugin/OpenAPI 传输包。
 
-因此当前可用方式是：把 GPT/Codex 当作对话和指导入口，在本机终端执行明确命令。宿主不应索取或保存 Garmin 密码、MFA、Token、SQLite 路径或原始健康数据。未来 WorkBuddy 和 Coze 适配器也必须复用同一 facade，不能各自实现训练规则。
+因此当前可用方式是：把 GPT/Codex 当作对话和指导入口，在本机终端执行明确命令。开始前先按 README 安装并运行 `. .venv/bin/activate`；每个新终端都要重新激活。宿主不应索取或保存 Garmin 密码、MFA、Token、SQLite 路径或原始健康数据。未来 WorkBuddy 和 Coze 适配器也必须复用同一 facade，不能各自实现训练规则。
 
 ## 用户只需要理解的闭环
 
@@ -124,7 +124,7 @@ athlete-growth notification-read NOTIFICATION_ID
 
 - `actionable-digest`：中/高风险立即；普通变化等到个人资料时区的摘要小时。当前是延时通知，不保证多个批次合并成一条。
 - `all`：每个真实变化批次都立即通知，可能更频繁。
-- `off`：仍自动同步和分析，但不创建 Inbox 或系统通知。
+- `off`：仍自动同步和分析；`off` 期间的新分析不创建新通知。已有 Inbox/历史与待投递项保留但不发送；重新启用后，仍待投递且已到期的项目可恢复投递。
 
 没有真实变化就不重复分析或通知。外部投递会重试；极少数情况下，macOS 已显示通知但回执尚未保存，恢复后可能重复一次。
 

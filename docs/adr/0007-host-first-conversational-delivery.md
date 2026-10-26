@@ -3,6 +3,8 @@
 - 状态：已接受
 - 日期：2026-10-26
 
+> **实现状态（2026-10-26）**：本文描述的是目标架构，不是当前已安装的宿主能力。GPT/Codex、WorkBuddy、Coze 的 MCP/Plugin/OpenAPI 传输、版本化 Tool Catalog、持久化新手引导状态机、OAuth/OIDC 身份映射、自托管远程模式和托管模式均尚未实现。当前可用界面是本地 CLI、JSON-safe 的宿主无关 Python facade，以及 macOS `launchd` 调度器和系统通知适配器。
+
 ## 背景
 
 本产品的主要使用方式不是让用户学习一组 CLI 命令，而是在 ChatGPT/Codex、WorkBuddy、Coze 等模型宿主中通过自然语言完成安装、授权、数据同步、分析、计划和反馈。各宿主的具体接入面不同，且会随平台变更：

@@ -3,7 +3,7 @@
 - 状态：已接受
 - 日期：2026-10-26
 
-实现注记（2026-10-26）：本 ADR 的本地持久化自动核心、Garmin 中国区 Poll、Inbox、macOS 系统通知和 `launchd` 适配器已经实现。官方 Push、模型宿主/邮件/移动端投递、Windows/Linux 安装器与托管 Worker 仍是目标设计。当前 `off` 的精确语义是继续分析但不创建任何通知。
+实现注记（2026-10-26）：本 ADR 的本地持久化自动核心、Garmin 中国区 Poll、Inbox、macOS 系统通知和 `launchd` 适配器已经实现。官方 Push、模型宿主/邮件/移动端投递、Windows/Linux 安装器与托管 Worker 仍是目标设计。当前 `off` 的精确语义是继续分析、不为新分析创建通知，并抑制已有待投递项的发送；Inbox/历史和待投递项仍保留，重新启用后可恢复到期投递。
 
 ## 背景
 
@@ -65,14 +65,13 @@ Push / Poll / Manual
 
 ### 5. 分析完成不等于立即打扰用户
 
-每次有效变化都生成可审计的分析快照和通知项；投递策略由用户控制：
+每次有效变化都生成可审计的分析快照；是否创建新通知、何时允许投递由以下三个实际枚举控制：
 
-- `actionable`：安全风险、今日计划需要改变、目标明显偏离时立即通知；
-- `digest`：普通新数据进入当日摘要；
-- `all`：每个有效批次都发送完成通知；
-- `off`：继续同步和分析，但当前版本不创建 Inbox 或外部通知。
+- `actionable-digest`：为变化集选择风险最高的快照；中/高风险立即可投递，低/未知风险排到指定的个人资料本地摘要小时；
+- `all`：每个真实变化集创建一条立即可投递通知；
+- `off`：继续同步和分析，但不为 `off` 期间产生的新分析创建通知。已有 Inbox/历史和待投递项不删除、不取消，同时抑制外部投递；重新启用后，仍待投递且已到期的项目可以再次被领取。
 
-当前默认采用 `actionable-digest`：需要行动的变化即时提醒，其余变化排到指定的本地摘要小时。用户可切换为每批通知或完全关闭通知。幂等去重、延时投递和已读回执已实现；安静时段、频率上限和跨变化集摘要合并仍待实现。高风险训练信号可以绕过普通摘要，但不能声称是医疗紧急监测。
+当前默认是 `actionable-digest`。幂等去重、延时投递、策略关闭时的领取/发送抑制和已读回执已实现；安静时段、频率上限和跨变化集摘要合并仍待实现。高风险训练信号可以绕过普通摘要，但不能声称是医疗紧急监测。
 
 ### 6. 模型宿主不是可靠消息队列
 
@@ -117,7 +116,7 @@ Push / Poll / Manual
 ## 官方依据
 
 - Garmin Personal API：[Program Overview](https://developer.garmin.com/gc-developer-program/overview/)（Personal 交付为 Pull only）
-- Garmin Activity API：[Activity API](https://developer.garmin.com/gc-developer-program/activity-api/)（商业接入可选 Push 或 Ping/Pull）
+- Garmin Activity API：[Activity API](https://developer.garmin.com/gc-developer-program/enterprise/activity-api/)（商业接入可选 Push 或 Ping/Pull）
 - Garmin Health API：[Health API](https://developer.garmin.com/gc-developer-program/enterprise/health-api/)（商业接入可选 Push 或 Ping/Pull）
 
 平台能力、频率限制和授权范围必须在连接器发布前重新验证，不能把当前接口行为写死在领域层。
