@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import gc
+import sqlite3
 import subprocess
 import sys
 import unittest
 import warnings
+from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -61,6 +63,7 @@ class SQLiteAutomationRepositoryTests(unittest.TestCase):
                 self.subscription,
                 now=self.now,
                 reason="schedule",
+                request_key="schedule-slot-001",
             )
             change_set = repository.save_change_set(
                 run.run_id,
@@ -91,7 +94,12 @@ class SQLiteAutomationRepositoryTests(unittest.TestCase):
 
         with TemporaryDirectory() as directory:
             repository = SQLiteAutomationRepository(Path(directory) / "athlete.sqlite3")
-            run = repository.start_sync_run(self.subscription, now=self.now, reason="schedule")
+            run = repository.start_sync_run(
+                self.subscription,
+                now=self.now,
+                reason="schedule",
+                request_key="schedule-slot-001",
+            )
 
             first_change_set = repository.save_change_set(
                 run.run_id,
@@ -123,7 +131,7 @@ class SQLiteAutomationRepositoryTests(unittest.TestCase):
             replayed_notification = repository.enqueue_notification(
                 replayed_snapshot,
                 priority="digest",
-                deliver_after=self.now + timedelta(hours=1),
+                deliver_after=None,
             )
 
             self.assertEqual(replayed_change_set, first_change_set)
@@ -132,11 +140,261 @@ class SQLiteAutomationRepositoryTests(unittest.TestCase):
             self.assertEqual(repository.list_snapshots("athlete-001"), [first_snapshot])
             self.assertEqual(repository.list_unread("athlete-001"), [first_notification])
 
+    def test_analysis_and_notification_identities_support_versions_and_reject_conflicts(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as directory:
+            repository = SQLiteAutomationRepository(Path(directory) / "athlete.sqlite3")
+            run = repository.start_sync_run(self.subscription, now=self.now, reason="manual")
+            change_set = repository.save_change_set(
+                run.run_id,
+                self.result,
+                created_at=self.now,
+            )
+            daily_v1 = repository.save_snapshot(
+                change_set,
+                {"period": "2026-10-26", "score": 82},
+                "low",
+                analysis_kind="daily",
+                algorithm_version="wellness/1.0",
+                created_at=self.now,
+            )
+            weekly_v1 = repository.save_snapshot(
+                change_set,
+                {"period": "2026-10-26", "score": 82},
+                "low",
+                analysis_kind="weekly",
+                algorithm_version="wellness/1.0",
+                created_at=self.now,
+            )
+            daily_v2 = repository.save_snapshot(
+                change_set,
+                {"period": "2026-10-26", "score": 83},
+                "low",
+                analysis_kind="daily",
+                algorithm_version="wellness/2.0",
+                created_at=self.now,
+            )
+            replay = repository.save_snapshot(
+                change_set,
+                {"period": "2026-10-26", "score": 82},
+                "low",
+                analysis_kind="daily",
+                algorithm_version="wellness/1.0",
+                created_at=self.now + timedelta(minutes=1),
+            )
+
+            self.assertEqual(replay, daily_v1)
+            self.assertEqual(
+                repository.list_snapshots("athlete-001"),
+                [daily_v1, daily_v2, weekly_v1],
+            )
+            self.assertEqual(len({item.snapshot_id for item in (daily_v1, weekly_v1, daily_v2)}), 3)
+            with self.assertRaisesRegex(ValueError, "conflict"):
+                repository.save_snapshot(
+                    change_set,
+                    {"period": "2026-10-26", "score": 99},
+                    "high",
+                    analysis_kind="daily",
+                    algorithm_version="wellness/1.0",
+                    created_at=self.now,
+                )
+
+            inbox_v1 = repository.enqueue_notification(
+                daily_v1,
+                priority="digest",
+                deliver_after=None,
+                policy_version="notification-policy/1.0",
+                channel="inbox",
+                title="Analysis ready",
+                body="Review the daily analysis.",
+                created_at=self.now,
+            )
+            email_v1 = repository.enqueue_notification(
+                daily_v1,
+                priority="digest",
+                deliver_after=None,
+                policy_version="notification-policy/1.0",
+                channel="email",
+                title="Analysis ready",
+                body="Review the daily analysis.",
+                created_at=self.now,
+            )
+            inbox_v2 = repository.enqueue_notification(
+                daily_v1,
+                priority="digest",
+                deliver_after=None,
+                policy_version="notification-policy/2.0",
+                channel="inbox",
+                title="Analysis ready",
+                body="Review the daily analysis.",
+                created_at=self.now,
+            )
+            notification_replay = repository.enqueue_notification(
+                daily_v1,
+                priority="digest",
+                deliver_after=None,
+                policy_version="notification-policy/1.0",
+                channel="inbox",
+                title="Analysis ready",
+                body="Review the daily analysis.",
+                created_at=self.now + timedelta(minutes=1),
+            )
+
+            self.assertEqual(notification_replay, inbox_v1)
+            self.assertEqual(
+                len({item.notification_id for item in (inbox_v1, email_v1, inbox_v2)}),
+                3,
+            )
+            with self.assertRaisesRegex(ValueError, "conflict"):
+                repository.enqueue_notification(
+                    daily_v1,
+                    priority="actionable",
+                    deliver_after=None,
+                    policy_version="notification-policy/1.0",
+                    channel="inbox",
+                    title="Changed title",
+                    body="Changed body",
+                    created_at=self.now,
+                )
+
+    def test_due_claim_is_atomic_and_stable_across_repository_instances(self) -> None:
+        with TemporaryDirectory() as directory:
+            database_file = Path(directory) / "athlete.sqlite3"
+            first_repository = SQLiteAutomationRepository(database_file)
+            second_repository = SQLiteAutomationRepository(database_file)
+            first_repository.save_subscription(self.subscription, next_run_at=self.now)
+
+            first_claim = first_repository.claim_due(self.now)
+            second_claim = second_repository.claim_due(self.now)
+
+            self.assertEqual(len(first_claim), 1)
+            self.assertEqual(second_claim, [])
+            claimed_subscription, claimed_run = first_claim[0]
+            self.assertEqual(claimed_subscription, self.subscription)
+            self.assertIsNotNone(claimed_run.request_key)
+            self.assertGreater(
+                first_repository.get_next_run_at("athlete-001", "garmin-cn"),
+                self.now,
+            )
+
+            reconstructed = SQLiteAutomationRepository(database_file)
+            self.assertEqual(reconstructed.claim_due(self.now), [])
+            self.assertEqual(
+                reconstructed.latest_sync_run("athlete-001", "garmin-cn"),
+                claimed_run,
+            )
+
+            reconstructed.save_subscription(self.subscription, next_run_at=self.now)
+            replayed_claim = reconstructed.claim_due(self.now)
+            self.assertEqual(replayed_claim, [(self.subscription, claimed_run)])
+            with closing(sqlite3.connect(database_file)) as connection:
+                run_count = connection.execute(
+                    "SELECT COUNT(*) FROM automation_sync_runs WHERE request_key = ?",
+                    (claimed_run.request_key,),
+                ).fetchone()[0]
+            self.assertEqual(run_count, 1)
+
+    def test_direct_scheduled_start_requires_a_stable_request_key(self) -> None:
+        with TemporaryDirectory() as directory:
+            repository = SQLiteAutomationRepository(Path(directory) / "athlete.sqlite3")
+            with self.assertRaisesRegex(ValueError, "claim_due"):
+                repository.start_sync_run(
+                    self.subscription,
+                    now=self.now,
+                    reason="schedule",
+                )
+
+            first = repository.start_sync_run(
+                self.subscription,
+                now=self.now,
+                reason="schedule",
+                request_key="schedule-slot-001",
+            )
+            replayed = repository.start_sync_run(
+                self.subscription,
+                now=self.now + timedelta(seconds=1),
+                reason="schedule",
+                request_key="schedule-slot-001",
+            )
+
+            self.assertEqual(replayed, first)
+
+    def test_terminal_run_updates_are_idempotent_and_cannot_be_overwritten(self) -> None:
+        completed_at = self.now + timedelta(minutes=1)
+        failed_at = self.now + timedelta(minutes=2)
+
+        with TemporaryDirectory() as directory:
+            repository = SQLiteAutomationRepository(Path(directory) / "athlete.sqlite3")
+            completed_run = repository.start_sync_run(
+                self.subscription,
+                now=self.now,
+                reason="manual",
+            )
+            first_completed = repository.complete_sync_run(
+                completed_run.run_id,
+                completed_at=completed_at,
+            )
+            replayed_completed = repository.complete_sync_run(
+                completed_run.run_id,
+                completed_at=completed_at,
+            )
+
+            self.assertEqual(replayed_completed, first_completed)
+            with self.assertRaisesRegex(ValueError, "conflict"):
+                repository.fail_sync_run(
+                    completed_run.run_id,
+                    error="late failure",
+                    completed_at=failed_at,
+                )
+            self.assertEqual(repository.get_sync_run(completed_run.run_id), first_completed)
+
+            failed_run = repository.start_sync_run(
+                self.subscription,
+                now=self.now,
+                reason="manual",
+            )
+            first_failed = repository.fail_sync_run(
+                failed_run.run_id,
+                error="network unavailable",
+                completed_at=failed_at,
+            )
+            replayed_failed = repository.fail_sync_run(
+                failed_run.run_id,
+                error="network unavailable",
+                completed_at=failed_at,
+            )
+
+            self.assertEqual(replayed_failed, first_failed)
+            with self.assertRaisesRegex(ValueError, "conflict"):
+                repository.complete_sync_run(
+                    failed_run.run_id,
+                    completed_at=failed_at,
+                )
+            self.assertEqual(repository.get_sync_run(failed_run.run_id), first_failed)
+
+            invalid_run = repository.start_sync_run(
+                self.subscription,
+                now=self.now,
+                reason="manual",
+            )
+            with self.assertRaisesRegex(ValueError, "completed_at"):
+                repository.complete_sync_run(
+                    invalid_run.run_id,
+                    completed_at=self.now - timedelta(seconds=1),
+                )
+            self.assertEqual(repository.get_sync_run(invalid_run.run_id), invalid_run)
+
     def test_read_and_delivery_state_are_durable(self) -> None:
         with TemporaryDirectory() as directory:
             database_file = Path(directory) / "athlete.sqlite3"
             repository = SQLiteAutomationRepository(database_file)
-            run = repository.start_sync_run(self.subscription, now=self.now, reason="schedule")
+            run = repository.start_sync_run(
+                self.subscription,
+                now=self.now,
+                reason="schedule",
+                request_key="schedule-slot-001",
+            )
             change_set = repository.save_change_set(
                 run.run_id,
                 self.result,
@@ -185,7 +443,12 @@ class SQLiteAutomationRepositoryTests(unittest.TestCase):
             database_file = Path(directory) / "athlete.sqlite3"
             repository = SQLiteAutomationRepository(database_file)
             repository.save_subscription(self.subscription, next_run_at=self.now)
-            run = repository.start_sync_run(self.subscription, now=self.now, reason="schedule")
+            run = repository.start_sync_run(
+                self.subscription,
+                now=self.now,
+                reason="schedule",
+                request_key="schedule-slot-001",
+            )
             failed = repository.fail_sync_run(
                 run.run_id,
                 error="authentication expired",
@@ -323,6 +586,31 @@ class SQLiteAutomationRepositoryTests(unittest.TestCase):
 
         cast(dict[str, JsonValue], payload["details"])["score"] = 0
         self.assertEqual(details["score"], 82)
+
+    def test_analysis_snapshot_hash_and_equality_preserve_json_types(self) -> None:
+        common: dict[str, object] = {
+            "snapshot_id": "snapshot-001",
+            "change_set_id": "change-set-001",
+            "athlete_id": "athlete-001",
+            "period": "2026-10-26",
+            "risk_level": "low",
+            "created_at": self.now,
+            "analysis_kind": "daily",
+            "algorithm_version": "wellness/1.0",
+        }
+        boolean_snapshot = AnalysisSnapshot(
+            **common,  # type: ignore[arg-type]
+            report={"period": "2026-10-26", "signal": True},
+        )
+        integer_snapshot = AnalysisSnapshot(
+            **common,  # type: ignore[arg-type]
+            report={"period": "2026-10-26", "signal": 1},
+        )
+
+        self.assertIsInstance(hash(boolean_snapshot), int)
+        self.assertIsInstance(hash(integer_snapshot), int)
+        self.assertNotEqual(boolean_snapshot, integer_snapshot)
+        self.assertEqual(len({boolean_snapshot, integer_snapshot}), 2)
 
     def test_notification_delivery_attempts_require_a_non_bool_non_negative_integer(self) -> None:
         values: tuple[object, ...] = (True, 1.5, -1)

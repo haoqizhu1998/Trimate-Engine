@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from enum import StrEnum
 from typing import Never, Self, cast
@@ -173,6 +173,7 @@ class SyncRun:
     started_at: datetime
     completed_at: datetime | None = None
     error: str | None = None
+    request_key: str | None = None
 
     def __post_init__(self) -> None:
         for field_name in ("run_id", "athlete_id", "source", "reason"):
@@ -182,6 +183,10 @@ class SyncRun:
         _require_aware(self.started_at, "started_at")
         if self.completed_at is not None:
             _require_aware(self.completed_at, "completed_at")
+            if self.completed_at < self.started_at:
+                raise ValueError("completed_at must not be earlier than started_at")
+        if self.request_key is not None:
+            _require_text(self.request_key, "request_key")
         if self.status == "running" and (self.completed_at is not None or self.error is not None):
             raise ValueError("a running sync cannot be completed or have an error")
         if self.status in {"completed", "failed"} and self.completed_at is None:
@@ -218,7 +223,7 @@ class DataChangeSet:
         object.__setattr__(self, "affected_dates", tuple(sorted(set(self.affected_dates))))
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, eq=False)
 class AnalysisSnapshot:
     snapshot_id: str
     change_set_id: str
@@ -227,14 +232,71 @@ class AnalysisSnapshot:
     report: dict[str, JsonValue]
     risk_level: str
     created_at: datetime
+    analysis_kind: str = "wellness"
+    algorithm_version: str = "wellness-report/1.0"
+    _report_json: str = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         for field_name in ("snapshot_id", "change_set_id", "athlete_id", "period"):
             _require_text(getattr(self, field_name), field_name)
         if self.risk_level not in {"unknown", "low", "moderate", "high"}:
             raise ValueError("risk_level must be unknown, low, moderate, or high")
+        _require_text(self.analysis_kind, "analysis_kind")
+        _require_text(self.algorithm_version, "algorithm_version")
         _require_aware(self.created_at, "created_at")
-        object.__setattr__(self, "report", _copy_json_object(self.report))
+        report = _copy_json_object(self.report)
+        object.__setattr__(self, "report", report)
+        object.__setattr__(
+            self,
+            "_report_json",
+            json.dumps(
+                report,
+                ensure_ascii=False,
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        )
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, AnalysisSnapshot):
+            return NotImplemented
+        return (
+            self.snapshot_id,
+            self.change_set_id,
+            self.athlete_id,
+            self.period,
+            self._report_json,
+            self.risk_level,
+            self.created_at,
+            self.analysis_kind,
+            self.algorithm_version,
+        ) == (
+            other.snapshot_id,
+            other.change_set_id,
+            other.athlete_id,
+            other.period,
+            other._report_json,
+            other.risk_level,
+            other.created_at,
+            other.analysis_kind,
+            other.algorithm_version,
+        )
+
+    def __hash__(self) -> int:
+        return hash(
+            (
+                self.snapshot_id,
+                self.change_set_id,
+                self.athlete_id,
+                self.period,
+                self._report_json,
+                self.risk_level,
+                self.created_at,
+                self.analysis_kind,
+                self.algorithm_version,
+            )
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -247,6 +309,8 @@ class UserNotification:
     body: str
     deliver_after: datetime | None
     created_at: datetime
+    policy_version: str = "notification-policy/1.0"
+    channel: str = "inbox"
     read_at: datetime | None = None
     delivered_at: datetime | None = None
     delivery_attempts: int = 0
@@ -257,6 +321,8 @@ class UserNotification:
             _require_text(getattr(self, field_name), field_name)
         if self.priority not in {"actionable", "digest"}:
             raise ValueError("priority must be actionable or digest")
+        _require_text(self.policy_version, "policy_version")
+        _require_text(self.channel, "channel")
         for field_name in ("deliver_after", "read_at", "delivered_at"):
             value = getattr(self, field_name)
             if value is not None:
