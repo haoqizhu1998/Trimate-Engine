@@ -49,6 +49,7 @@ hosts/
 engine_ready
   → profile_required
   → data_source_required
+  → automation_setup
   → syncing
   → baseline_partial | baseline_ready
   → goal_required
@@ -98,6 +99,8 @@ source.list_options
 source.begin_connection
 source.get_sync_status
 source.sync
+automation.configure
+automation.get_status
 report.get_today
 report.get_weekly
 check_in.record
@@ -106,6 +109,8 @@ goal.list
 plan.create_first_week
 plan.review
 data.get_quality
+notification.configure
+notification.list_unread
 data.export_preview
 data.export_confirm
 ```

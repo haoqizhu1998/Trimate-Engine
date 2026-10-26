@@ -26,28 +26,38 @@
 - 数据授权、AI 外发、导出、备份、更正和删除是基础能力，不延后到商业化阶段。
 - 采用**宿主优先、核心宿主无关**的产品形态：统一 Tool Catalog 是用户入口，MCP 和 HTTP/OpenAPI 只是传输适配，CLI 仅作为开发、诊断、恢复与降级入口。
 - 新手引导进度保存在应用层状态机中，不依赖模型记忆、Prompt 或单次对话历史。
+- 自动同步、分析和通知通过持久化事件串联；外部信号允许重复，内部处理必须幂等、可恢复且可审计。
 
 ## 3. 系统关系
 
 ```mermaid
 flowchart LR
-    Sources[Garmin CN / FIT / 赛事来源] --> Connectors[连接器适配器]
+    Sources[Garmin CN / Personal API / 文件 / 赛事来源] --> Signal[Push / Poll / Manual]
+    Signal --> Sync[同步协调器]
+    Sync --> Connectors[连接器适配器]
     Connectors --> Ingest[采集与标准化]
     CheckIn[主观 Check-in / 生活情境] --> Ingest
     Ingest --> Raw[(原始数据区)]
     Ingest --> Canonical[(标准化数据区)]
-    Canonical --> Analytics[确定性分析引擎]
+    Ingest --> Changes[(变化集与持久化任务箱)]
+    Changes --> Analytics[确定性分析引擎]
+    Canonical --> Analytics
     Profile[个人资料 / 目标 / 约束] --> Analytics
     Analytics --> Derived[(派生指标与证据)]
     Derived --> Safety[安全规则与风险升级]
     Safety --> Coach[计划与成长服务]
     Profile --> Coach
-    Coach --> AI[AI 编排与模型适配器]
-    AI --> Reports[日报 / 周报 / 计划 / 赛事策略]
+    Coach --> Reports[日报 / 周报 / 计划 / 赛事策略]
+    Coach -. 可选解释 .-> AI[AI 编排与模型适配器]
+    AI -. 增强表述 .-> Reports
+    Reports --> Notify[通知决策与 Outbox]
+    Notify --> Inbox[用户未读收件箱]
+    Notify --> Delivery[系统 / 邮件 / 宿主通知适配器]
     Feedback[执行结果 / 用户纠正] --> Learning[个人响应学习]
     Reports --> Feedback
     Learning --> Analytics
     Reports --> Tools[统一 Tool Catalog]
+    Inbox --> Tools
     Onboarding[应用层引导状态机] --> Tools
     Tools --> MCP[MCP 适配器]
     Tools --> HTTP[HTTP / OpenAPI 适配器]
@@ -157,6 +167,17 @@ flowchart LR
 - 本地模式使用一次性配对或本机权限；远程模式使用 OAuth/OIDC，并将外部身份映射到 `athlete_id`；
 - 删除、导出、计划写回等敏感动作必须由引擎签发和校验短时效确认令牌，不能只依赖宿主文本确认。
 
+### 4.11 Automation & Notifications
+
+- 连接器声明 `push`、`poll` 或 `manual` 交付模式；官方推送和后台轮询最终进入同一同步协调器；
+- Garmin Personal API 和当前 Garmin 中国区连接器采用增量轮询，设备唤醒或网络恢复后自动补拉；
+- 同步批次仅在真正新增、替换或失效标准记录时生成 `DataChangeSet`，纯重复批次不触发重复分析；
+- 分析作业以数据水位和算法版本作为幂等键，先执行确定性指标、数据质量和安全规则，再选择是否调用 AI 解释；
+- 每次有效变化都生成可审计的 `AnalysisSnapshot` 和通知项；立即推送、摘要或仅保留未读由用户策略决定；
+- 模型宿主不能被当作可靠消息队列：所有通知先写入本地 Outbox/Inbox，再由宿主、本机系统或邮件适配器投递；
+- 后台运行器状态、上次/下次同步、任务积压、最近分析和投递失败通过统一工具查询；
+- 本地模式依赖用户设备开机和后台运行器，自托管或托管模式才能提供全天候处理。
+
 ## 5. 已实现源码结构
 
 产品仓使用包名 `athlete_growth`。阶段 0–5 的实际结构如下；阶段 5.5 的宿主适配、独立 Web/App 和发布系统尚未创建：
@@ -214,9 +235,17 @@ athlete-growth/
 ```text
 src/athlete_growth/
 ├── application/onboarding/   # 可恢复的引导状态机
+├── application/automation/   # 同步协调、变化集、分析作业与恢复
+├── application/notification/ # 通知策略、Inbox 与 Outbox
 ├── interfaces/tools/         # 统一 Tool Catalog 与结果契约
 ├── interfaces/mcp/           # MCP 传输适配
-└── interfaces/http/          # HTTP/OpenAPI 传输适配
+├── interfaces/http/          # HTTP/OpenAPI 与 webhook 传输适配
+└── interfaces/worker/        # 本地/自托管后台运行器
+src/athlete_growth/ports/
+├── scheduler.py              # 时间与来源信号端口
+└── notification.py           # 宿主、系统、邮件通知端口
+src/athlete_growth/adapters/notifications/
+└── ...                       # 各投递渠道的薄适配器
 hosts/
 ├── chatgpt/                  # MCP/Plugin 与 GPT Action 描述
 ├── workbuddy/                # MCP 插件、Skill 与 Workflow
@@ -248,12 +277,14 @@ domain 不依赖 Garmin、AI SDK、数据库或 Web 框架
 - `AthleteProfile`
 - `AthleteConstraint`、`ConsentGrant`、`DataRetentionPolicy`
 - `DataSourceAccount`、`SyncCursor`、`SourceRecord`
+- `SyncSubscription`、`SyncRun`、`DataChangeSet`
 - `Activity`、`ActivitySample`、`Lap`、`ExerciseSet`
 - `BodyObservation`、`SubjectiveCheckIn`、`ContextEvent`、`DailyRecovery`
 - `Goal`、`RaceEvent`
 - `TrainingPlan`、`PlannedSession`、`CompletedSession`、`PlanDecision`
 - `NutritionPlan`、`RaceStrategy`
 - `MetricResult`、`Recommendation`、`EvidenceRef`、`SafetySignal`
+- `AnalysisRun`、`AnalysisSnapshot`、`NotificationPolicy`、`NotificationOutbox`、`NotificationDelivery`
 - `ModelRun`、`PromptVersion`、`UserFeedback`、`OutcomeFeedback`
 - `PersonalResponseModel`、`GrowthMilestone`、`KnowledgeVersion`
 
@@ -294,7 +325,7 @@ domain 不依赖 Garmin、AI SDK、数据库或 Web 框架
 ### DataSourceConnector
 
 - `authenticate()`：建立或刷新授权；
-- `capabilities()`：声明可读数据、可写动作与时间范围；
+- `capabilities()`：声明可读数据、可写动作、时间范围、交付模式和速率限制；
 - `sync(since, cursor)`：增量获取并返回来源记录；
 - `healthcheck()`：检查授权和服务状态；
 - `revoke()`：清除本地授权。
@@ -323,6 +354,21 @@ domain 不依赖 Garmin、AI SDK、数据库或 Web 框架
 - `capabilities()`：协商流式进度、OAuth、卡片展示和本地文件访问等宿主能力；
 - 所有面向用户的结果统一包含 `summary`、`facts`、`evidence_ids`、`confidence`、`data_gaps`、`risk`、`next_actions`、`requires_confirmation` 和 `disclosure`。
 
+### AutomationCoordinator
+
+- `request_sync(source, reason, window)`：幂等登记推送、轮询或手动同步请求；
+- `run_due(now)`：领取到期任务并记录心跳、重试和错误；
+- `publish_changes(sync_run)`：只为真实数据变化创建变化集；
+- `analyze(change_set)`：按数据水位和算法版本生成分析快照；
+- `recover()`：重启后恢复未完成同步、分析和通知任务。
+
+### NotificationPort
+
+- `capabilities()`：声明是否支持主动推送、回执、卡片和敏感内容限制；
+- `deliver(notification)`：幂等投递最小化通知内容；
+- `status(delivery_id)`：查询回执或失败原因；
+- 不支持主动推送的宿主通过 `notification.list_unread` 读取持久化 Inbox。
+
 ## 9. 安全与产品化边界
 
 - 默认本地监听，远程访问必须鉴权；
@@ -332,6 +378,8 @@ domain 不依赖 Garmin、AI SDK、数据库或 Web 框架
 - 用户可以从产品第一版开始导出、备份、恢复、更正和删除数据；
 - 删除、训练写入、赛事报名等动作必须二次确认；
 - 每个连接器有契约测试和速率限制；
+- 自动同步、自动分析和主动通知均可由用户分别暂停，安静时段与通知粒度可调整；
+- webhook 必须验证来源签名、防重放并与正确的 `athlete_id` 绑定；
 - 商业版本不得依赖私有研发仓才能构建或运行；
 - 开源样例只能使用合成或彻底匿名化数据。
 
@@ -341,6 +389,7 @@ domain 不依赖 Garmin、AI SDK、数据库或 Web 框架
 - 安全测试：疼痛、疾病、恢复异常和目标冲突不能被 AI 绕过；
 - 契约测试：所有 Garmin/赛事/AI 适配器必须满足统一端口；
 - 集成测试：使用脱敏 Fixture 验证同步、去重和数据库迁移；
+- 自动化测试：重复信号、进程重启、网络恢复和部分失败不会丢任务或重复通知；
 - 数据权利测试：导出可恢复、撤回授权立即生效、删除不遗留孤儿数据；
 - Golden tests：固定输入对应固定训练指标和报告结构；
 - AI 评测：事实一致性、证据引用、结构化输出、用户纠正、风险建议和模型降级；
