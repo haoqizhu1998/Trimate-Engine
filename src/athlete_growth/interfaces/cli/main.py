@@ -99,7 +99,7 @@ def _build_parser() -> argparse.ArgumentParser:
     automation_run.add_argument(
         "--force",
         action="store_true",
-        help="make enabled policies due using an idempotent minute slot",
+        help="run enabled policies now using an idempotent minute slot",
     )
     add_home(automation_run)
     automation_install = subcommands.add_parser(

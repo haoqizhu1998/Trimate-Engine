@@ -193,9 +193,10 @@ class AutomationHostAndCLITests(unittest.TestCase):
         EmptyGarminConnector,
     )
     def test_force_run_is_minute_idempotent(self, _sink) -> None:
+        future_schedule = datetime(2026, 10, 27, tzinfo=UTC)
         host_tools.configure_automation(
             self.home,
-            next_run_at=datetime(2026, 10, 27, tzinfo=UTC),
+            next_run_at=future_schedule,
         )
 
         first = host_tools.run_automation_once(
@@ -216,6 +217,10 @@ class AutomationHostAndCLITests(unittest.TestCase):
         assert latest is not None
         self.assertEqual(latest.status, "completed")
         self.assertEqual(latest.reason, "force")
+        self.assertEqual(
+            self.repository.get_next_run_at(self.athlete_id, "garmin-cn"),
+            future_schedule,
+        )
 
     @patch(
         "athlete_growth.interfaces.host.tools.default_notification_sink",
@@ -316,9 +321,10 @@ class AutomationHostAndCLITests(unittest.TestCase):
         BlockingGarminConnector.started.clear()
         BlockingGarminConnector.release.clear()
         BlockingGarminConnector.calls = 0
+        due_slot = self.now.replace(second=0, microsecond=0)
         host_tools.configure_automation(
             self.home,
-            next_run_at=datetime(2026, 10, 27, tzinfo=UTC),
+            next_run_at=due_slot,
         )
         with ThreadPoolExecutor(max_workers=2) as pool:
             first_future = pool.submit(
@@ -337,8 +343,14 @@ class AutomationHostAndCLITests(unittest.TestCase):
             BlockingGarminConnector.release.set()
             first = first_future.result(timeout=5)
 
+        ordinary = host_tools.run_automation_once(
+            self.home,
+            clock=lambda: self.now,
+        )
+
         self.assertEqual(sorted((first["claimed"], second["claimed"])), [0, 1])
         self.assertEqual(first["completed"] + second["completed"], 1)
+        self.assertEqual(ordinary["claimed"], 0)
         self.assertEqual(BlockingGarminConnector.calls, 1)
 
     def test_notification_list_and_read_enforce_current_athlete_ownership(self) -> None:

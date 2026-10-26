@@ -184,12 +184,6 @@ def run_automation_once(
 
     runtime = _HostRuntime.load(data_home)
     active_clock = clock or (lambda: datetime.now(UTC))
-    now = _aware(active_clock(), "clock")
-    if force:
-        forced_slot = now.replace(second=0, microsecond=0)
-        for subscription in runtime.automation.list_subscriptions(runtime.athlete_id):
-            if subscription.enabled:
-                runtime.automation.schedule_next(subscription, next_run_at=forced_slot)
     loop = AutomaticTrainingLoop(
         automation_repository=runtime.automation,
         record_store=runtime.records,

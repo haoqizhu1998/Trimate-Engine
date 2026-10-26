@@ -815,6 +815,126 @@ class SQLiteAutomationRepository:
         finally:
             connection.close()
 
+    def claim_force(
+        self,
+        now: datetime,
+        *,
+        limit: int = 100,
+        owner: str | None = None,
+        lease_duration: timedelta = timedelta(minutes=15),
+        exclude: Collection[tuple[str, str]] = (),
+        lease_clock: Callable[[], datetime] | None = None,
+    ) -> list[tuple[SyncSubscription, SyncRun]]:
+        """Atomically claim enabled work for the current forced minute slot."""
+
+        fallback_now = self._datetime(now, "now")
+        self._lease_expiry(fallback_now, lease_duration)
+        if owner is not None and not owner.strip():
+            raise ValueError("owner must not be blank")
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            raise ValueError("limit must be a positive integer")
+        excluded = tuple(sorted(set(exclude)))
+        exclusion_sql = "".join(
+            " AND NOT (sync_subscriptions.athlete_id = ? AND sync_subscriptions.source = ?)"
+            for _ in excluded
+        )
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            claimed_at = self._lease_time(lease_clock, fallback_now, "now")
+            force_slot = claimed_at.replace(second=0, microsecond=0)
+            lease_expires_at = self._lease_expiry(claimed_at, lease_duration)
+            parameters: list[object] = []
+            for athlete_id, source in excluded:
+                parameters.extend((athlete_id, source))
+            parameters.append(limit)
+            rows = connection.execute(
+                f"""
+                SELECT * FROM sync_subscriptions
+                WHERE enabled = 1
+                  AND NOT EXISTS (
+                      SELECT 1 FROM automation_sync_runs AS active_run
+                      WHERE active_run.athlete_id = sync_subscriptions.athlete_id
+                        AND active_run.source = sync_subscriptions.source
+                        AND active_run.status = 'running'
+                  )
+                  {exclusion_sql}
+                ORDER BY next_run_at, athlete_id, source
+                LIMIT ?
+                """,
+                tuple(parameters),
+            ).fetchall()
+            claims: list[tuple[SyncSubscription, SyncRun]] = []
+            for row in rows:
+                subscription = self._subscription_from_row(row)
+                scheduled_at = datetime.fromisoformat(row["next_run_at"])
+                request_key = self._identifier(
+                    "sync-request",
+                    subscription.athlete_id,
+                    subscription.source,
+                    force_slot.isoformat(),
+                    "force",
+                )
+                run_row = connection.execute(
+                    "SELECT * FROM automation_sync_runs WHERE request_key = ?",
+                    (request_key,),
+                ).fetchone()
+                if run_row is None:
+                    run = SyncRun(
+                        run_id=self._identifier("sync-run", request_key),
+                        athlete_id=subscription.athlete_id,
+                        source=subscription.source,
+                        reason="force",
+                        status="running",
+                        started_at=claimed_at,
+                        request_key=request_key,
+                        lease_token=uuid4().hex,
+                        lease_owner=owner,
+                        lease_expires_at=lease_expires_at,
+                        updated_at=claimed_at,
+                    )
+                    self._insert_sync_run(connection, run)
+                else:
+                    run = self._sync_run_from_row(run_row)
+                    if (
+                        run.athlete_id != subscription.athlete_id
+                        or run.source != subscription.source
+                        or run.reason != "force"
+                    ):
+                        raise ValueError("sync request idempotency conflict")
+
+                if scheduled_at <= claimed_at:
+                    next_run_at = scheduled_at
+                    interval = timedelta(minutes=subscription.interval_minutes)
+                    while next_run_at <= claimed_at:
+                        next_run_at += interval
+                    connection.execute(
+                        """
+                        UPDATE sync_subscriptions
+                        SET next_run_at = ?
+                        WHERE athlete_id = ? AND source = ? AND next_run_at = ?
+                        """,
+                        (
+                            next_run_at.isoformat(),
+                            subscription.athlete_id,
+                            subscription.source,
+                            scheduled_at.isoformat(),
+                        ),
+                    )
+                if run.status == "running":
+                    claims.append((subscription, run))
+            commit_at = self._lease_time(lease_clock, fallback_now, "now")
+            if claims and lease_expires_at <= commit_at:
+                raise ValueError("claimed sync run lease expired before commit")
+            connection.commit()
+            return claims
+        except BaseException:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        finally:
+            connection.close()
+
     def start_sync_run(
         self,
         subscription: SyncSubscription,

@@ -183,15 +183,25 @@ class AutomaticTrainingLoop:
                 continue
             return subscription, reclaimed, True
 
-        claims = self.automation_repository.claim_due(
-            self._now(),
-            reason=claim_reason,
-            owner=self.owner,
-            lease_duration=self.lease_duration,
-            limit=1,
-            exclude=processed_subscriptions,
-            lease_clock=self._now,
-        )
+        if claim_reason == "force":
+            claims = self.automation_repository.claim_force(
+                self._now(),
+                owner=self.owner,
+                lease_duration=self.lease_duration,
+                limit=1,
+                exclude=processed_subscriptions,
+                lease_clock=self._now,
+            )
+        else:
+            claims = self.automation_repository.claim_due(
+                self._now(),
+                reason=claim_reason,
+                owner=self.owner,
+                lease_duration=self.lease_duration,
+                limit=1,
+                exclude=processed_subscriptions,
+                lease_clock=self._now,
+            )
         if not claims:
             return None
         subscription, run = claims[0]
