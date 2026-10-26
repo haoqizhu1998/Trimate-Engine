@@ -1,5 +1,7 @@
 # 模型宿主优先的新手引导
 
+> 这是未来宿主适配器的目标交互设计，不是当前已安装能力。当前 GPT/Codex、WorkBuddy、Coze 传输和持久化引导状态机尚未实现；已可用的新手步骤、CLI 回退与 macOS 自动化边界见 [新手与模型宿主引导](onboarding.md)。
+
 ## 1. 目标用户与 JTBD
 
 **Persona**：使用 ChatGPT/Codex、WorkBuddy 或 Coze 的个人运动者，有 Garmin 或运动文件，但不理解训练建模和产品内部命令。
