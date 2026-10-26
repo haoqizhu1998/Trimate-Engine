@@ -12,7 +12,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Barrier
-from typing import cast
+from typing import Any, cast
 
 from athlete_growth.adapters.storage.sqlite_automation import SQLiteAutomationRepository
 from athlete_growth.application.automation import (
@@ -498,7 +498,7 @@ class SQLiteAutomationRepositoryTests(unittest.TestCase):
                     connection.execute("DELETE FROM automation_sync_runs_automation_v1_backup")
                 connection.rollback()
 
-            self.assertEqual(version, 2)
+            self.assertEqual(version, 3)
             self.assertTrue(
                 {
                     "sync_subscriptions_automation_v1_backup",
@@ -510,7 +510,14 @@ class SQLiteAutomationRepositoryTests(unittest.TestCase):
                 <= table_names
             )
             self.assertTrue(
-                {"request_key", "lease_owner", "lease_expires_at", "updated_at"} <= run_columns
+                {
+                    "request_key",
+                    "lease_token",
+                    "lease_owner",
+                    "lease_expires_at",
+                    "updated_at",
+                }
+                <= run_columns
             )
             self.assertIn("completed_at >= started_at", run_ddl)
             self.assertEqual(foreign_key_errors, [])
@@ -581,7 +588,7 @@ class SQLiteAutomationRepositoryTests(unittest.TestCase):
                     "SELECT COUNT(*) FROM automation_sync_runs_automation_v1_backup"
                 ).fetchone()[0]
 
-            self.assertEqual(version, 2)
+            self.assertEqual(version, 3)
             self.assertEqual(foreign_key_errors, [])
             self.assertEqual(live_tables, 3)
             self.assertEqual(backup_tables, 5)
@@ -611,6 +618,107 @@ class SQLiteAutomationRepositoryTests(unittest.TestCase):
             )
 
             self.assertEqual(replayed, first)
+
+    def test_reclaim_rotates_lease_token_and_fences_the_stale_worker(self) -> None:
+        with TemporaryDirectory() as directory:
+            repository = SQLiteAutomationRepository(Path(directory) / "athlete.sqlite3")
+            repository.save_subscription(self.subscription, next_run_at=self.now)
+            claimed = repository.claim_due(
+                self.now,
+                owner="worker-old",
+                lease_duration=timedelta(minutes=5),
+            )[0][1]
+            assert claimed.lease_token is not None
+
+            reclaimed_at = self.now + timedelta(minutes=5)
+            reclaimed = repository.reclaim_sync_run(
+                claimed.run_id,
+                now=reclaimed_at,
+                owner="worker-new",
+                lease_duration=timedelta(minutes=10),
+            )
+            assert reclaimed.lease_token is not None
+            self.assertNotEqual(reclaimed.lease_token, claimed.lease_token)
+
+            terminal_at = reclaimed_at + timedelta(minutes=1)
+            with self.assertRaisesRegex(ValueError, "lease token"):
+                repository.complete_sync_run(
+                    claimed.run_id,
+                    completed_at=terminal_at,
+                    lease_token=claimed.lease_token,
+                )
+            with self.assertRaisesRegex(ValueError, "lease token"):
+                repository.fail_sync_run(
+                    claimed.run_id,
+                    error="stale worker failure",
+                    completed_at=terminal_at,
+                    lease_token=claimed.lease_token,
+                )
+            with self.assertRaisesRegex(ValueError, "lease token"):
+                repository.complete_sync_run(
+                    claimed.run_id,
+                    completed_at=terminal_at,
+                )
+            self.assertEqual(repository.get_sync_run(claimed.run_id), reclaimed)
+
+            completed = repository.complete_sync_run(
+                claimed.run_id,
+                completed_at=terminal_at,
+                lease_token=reclaimed.lease_token,
+            )
+            self.assertEqual(completed.status, "completed")
+
+    def test_renewal_requires_current_owner_and_token_and_enforces_chronology(self) -> None:
+        with TemporaryDirectory() as directory:
+            repository = SQLiteAutomationRepository(Path(directory) / "athlete.sqlite3")
+            repository.save_subscription(self.subscription, next_run_at=self.now)
+            claimed = repository.claim_due(
+                self.now,
+                owner="worker-a",
+                lease_duration=timedelta(minutes=10),
+            )[0][1]
+            assert claimed.lease_token is not None
+
+            renewed_at = self.now + timedelta(minutes=5)
+            with self.assertRaisesRegex(ValueError, "lease token"):
+                repository.renew_lease(
+                    claimed.run_id,
+                    "wrong-token",
+                    owner="worker-a",
+                    now=renewed_at,
+                    lease_duration=timedelta(minutes=30),
+                )
+            with self.assertRaisesRegex(ValueError, "lease owner"):
+                repository.renew_lease(
+                    claimed.run_id,
+                    claimed.lease_token,
+                    owner="worker-b",
+                    now=renewed_at,
+                    lease_duration=timedelta(minutes=30),
+                )
+            self.assertEqual(repository.get_sync_run(claimed.run_id), claimed)
+
+            renewed = repository.renew_lease(
+                claimed.run_id,
+                claimed.lease_token,
+                owner="worker-a",
+                now=renewed_at,
+                lease_duration=timedelta(minutes=30),
+            )
+            self.assertEqual(renewed.lease_token, claimed.lease_token)
+            self.assertEqual(renewed.updated_at, renewed_at)
+            self.assertEqual(
+                renewed.lease_expires_at,
+                renewed_at + timedelta(minutes=30),
+            )
+
+            with self.assertRaisesRegex(ValueError, "updated_at"):
+                repository.complete_sync_run(
+                    claimed.run_id,
+                    completed_at=renewed_at - timedelta(seconds=1),
+                    lease_token=renewed.lease_token,
+                )
+            self.assertEqual(repository.get_sync_run(claimed.run_id), renewed)
 
     def test_terminal_run_updates_are_idempotent_and_cannot_be_overwritten(self) -> None:
         completed_at = self.now + timedelta(minutes=1)
@@ -741,10 +849,12 @@ class SQLiteAutomationRepositoryTests(unittest.TestCase):
                 reason="schedule",
                 request_key="schedule-slot-001",
             )
+            assert run.lease_token is not None
             failed = repository.fail_sync_run(
                 run.run_id,
                 error="authentication expired",
                 completed_at=failed_at,
+                lease_token=run.lease_token,
             )
             repository.schedule_next(self.subscription, next_run_at=next_run_at)
 
@@ -881,6 +991,15 @@ class SQLiteAutomationRepositoryTests(unittest.TestCase):
             dict.__setitem__(details, "score", 0)
         with self.assertRaises(TypeError):
             list.__setitem__(signals, 0, "base-mutator-bypass")
+        report_backing = cast(Any, snapshot.report)._values
+        details_backing = cast(Any, details)._values
+        signals_backing = cast(Any, signals)._values
+        with self.assertRaises(TypeError):
+            report_backing[0] = "backing-bypass"
+        with self.assertRaises(TypeError):
+            details_backing[0] = "backing-bypass"
+        with self.assertRaises(TypeError):
+            signals_backing[0] = "backing-bypass"
 
         cast(dict[str, JsonValue], payload["details"])["score"] = 0
         self.assertEqual(details["score"], 82)
@@ -909,6 +1028,30 @@ class SQLiteAutomationRepositoryTests(unittest.TestCase):
         self.assertIsInstance(hash(integer_snapshot), int)
         self.assertNotEqual(boolean_snapshot, integer_snapshot)
         self.assertEqual(len({boolean_snapshot, integer_snapshot}), 2)
+
+        matching_snapshot = AnalysisSnapshot(
+            **common,  # type: ignore[arg-type]
+            report={"period": "2026-10-26", "signal": True},
+        )
+        frozen_object = boolean_snapshot.report
+        matching_object = matching_snapshot.report
+        self.assertEqual(frozen_object, matching_object)
+        self.assertEqual(hash(frozen_object), hash(matching_object))
+        self.assertNotEqual(frozen_object, {"period": "2026-10-26", "signal": True})
+
+        array_snapshot = AnalysisSnapshot(
+            **common,  # type: ignore[arg-type]
+            report={"period": "2026-10-26", "signals": [True, 1]},
+        )
+        matching_array_snapshot = AnalysisSnapshot(
+            **common,  # type: ignore[arg-type]
+            report={"period": "2026-10-26", "signals": [True, 1]},
+        )
+        frozen_array = array_snapshot.report["signals"]
+        matching_array = matching_array_snapshot.report["signals"]
+        self.assertEqual(frozen_array, matching_array)
+        self.assertEqual(hash(frozen_array), hash(matching_array))
+        self.assertNotEqual(frozen_array, (True, 1))
 
     def test_notification_delivery_attempts_require_a_non_bool_non_negative_integer(self) -> None:
         values: tuple[object, ...] = (True, 1.5, -1)

@@ -30,6 +30,8 @@ if TYPE_CHECKING:
 class SQLiteAutomationRepository:
     """Persist scheduling, sync, analysis, and notification state atomically."""
 
+    _SCHEMA_VERSION = 3
+
     def __init__(self, database_file: Path) -> None:
         self.database_file = database_file
         database_file.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -73,11 +75,12 @@ class SQLiteAutomationRepository:
             }
             should_set_version = False
             if not tables.intersection(core_tables):
-                self._create_v2_schema(connection)
+                self._create_schema(connection)
                 should_set_version = True
-            elif version == 2:
+            elif version == self._SCHEMA_VERSION:
                 required_run_columns = {
                     "request_key",
+                    "lease_token",
                     "lease_owner",
                     "lease_expires_at",
                     "updated_at",
@@ -85,10 +88,12 @@ class SQLiteAutomationRepository:
                 if not required_run_columns <= self._table_columns(
                     connection, "automation_sync_runs"
                 ):
-                    raise ValueError("automation schema version 2 is incomplete")
-                self._create_v2_schema(connection)
-            elif version is None or version < 2:
-                self._rebuild_v2_schema(connection, tables)
+                    raise ValueError(
+                        f"automation schema version {self._SCHEMA_VERSION} is incomplete"
+                    )
+                self._create_schema(connection)
+            elif version is None or version < self._SCHEMA_VERSION:
+                self._rebuild_schema(connection, tables, source_version=version or 1)
                 should_set_version = True
             else:
                 raise ValueError(f"unsupported automation schema version: {version}")
@@ -116,7 +121,7 @@ class SQLiteAutomationRepository:
         }
 
     @classmethod
-    def _create_v2_schema(cls, connection: sqlite3.Connection) -> None:
+    def _create_schema(cls, connection: sqlite3.Connection) -> None:
         statements = (
             """
             CREATE TABLE IF NOT EXISTS automation_schema_version (
@@ -150,16 +155,24 @@ class SQLiteAutomationRepository:
                 completed_at TEXT,
                 error TEXT,
                 request_key TEXT,
+                lease_token TEXT,
                 lease_owner TEXT,
                 lease_expires_at TEXT,
                 updated_at TEXT NOT NULL,
                 CHECK (
                     (status = 'running' AND completed_at IS NULL AND error IS NULL
-                        AND lease_expires_at IS NOT NULL)
+                        AND (
+                            (lease_token IS NULL AND lease_owner IS NULL
+                                AND lease_expires_at IS NULL)
+                            OR (lease_token IS NOT NULL AND length(trim(lease_token)) > 0
+                                AND lease_expires_at IS NOT NULL)
+                        ))
                     OR (status = 'completed' AND completed_at IS NOT NULL AND error IS NULL
-                        AND lease_owner IS NULL AND lease_expires_at IS NULL)
+                        AND lease_token IS NULL AND lease_owner IS NULL
+                        AND lease_expires_at IS NULL)
                     OR (status = 'failed' AND completed_at IS NOT NULL
                         AND error IS NOT NULL AND length(trim(error)) > 0
+                        AND lease_token IS NULL
                         AND lease_owner IS NULL AND lease_expires_at IS NULL)
                 ),
                 CHECK (completed_at IS NULL OR completed_at >= started_at),
@@ -219,39 +232,42 @@ class SQLiteAutomationRepository:
         for statement in statements:
             connection.execute(statement)
         index_statements = (
-            "CREATE INDEX IF NOT EXISTS idx_sync_subscriptions_schema_v2 "
+            "CREATE INDEX IF NOT EXISTS idx_sync_subscriptions_schema_v3 "
             "ON sync_subscriptions(enabled, next_run_at, athlete_id, source)",
-            "CREATE INDEX IF NOT EXISTS idx_automation_sync_runs_latest_schema_v2 "
+            "CREATE INDEX IF NOT EXISTS idx_automation_sync_runs_latest_schema_v3 "
             "ON automation_sync_runs(athlete_id, source, started_at DESC, run_id DESC)",
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_automation_sync_runs_request_schema_v2 "
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_automation_sync_runs_request_schema_v3 "
             "ON automation_sync_runs(request_key) WHERE request_key IS NOT NULL",
-            "CREATE INDEX IF NOT EXISTS idx_automation_sync_runs_recoverable_schema_v2 "
+            "CREATE INDEX IF NOT EXISTS idx_automation_sync_runs_recoverable_schema_v3 "
             "ON automation_sync_runs(status, lease_expires_at, started_at, run_id)",
-            "CREATE INDEX IF NOT EXISTS idx_analysis_snapshots_athlete_schema_v2 "
+            "CREATE INDEX IF NOT EXISTS idx_analysis_snapshots_athlete_schema_v3 "
             "ON analysis_snapshots("
             "athlete_id, created_at, analysis_kind, algorithm_version, snapshot_id)",
-            "CREATE INDEX IF NOT EXISTS idx_notification_inbox_unread_schema_v2 "
+            "CREATE INDEX IF NOT EXISTS idx_notification_inbox_unread_schema_v3 "
             "ON notification_inbox(athlete_id, read_at, created_at, notification_id)",
-            "CREATE INDEX IF NOT EXISTS idx_notification_inbox_pending_schema_v2 "
+            "CREATE INDEX IF NOT EXISTS idx_notification_inbox_pending_schema_v3 "
             "ON notification_inbox(delivered_at, deliver_after, created_at, notification_id)",
         )
         for statement in index_statements:
             connection.execute(statement)
 
-    @staticmethod
-    def _set_schema_version(connection: sqlite3.Connection) -> None:
+    @classmethod
+    def _set_schema_version(cls, connection: sqlite3.Connection) -> None:
         connection.execute(
             """
-            INSERT INTO automation_schema_version (singleton, version) VALUES (1, 2)
+            INSERT INTO automation_schema_version (singleton, version) VALUES (1, ?)
             ON CONFLICT(singleton) DO UPDATE SET version = excluded.version
-            """
+            """,
+            (cls._SCHEMA_VERSION,),
         )
 
     @classmethod
-    def _rebuild_v2_schema(
+    def _rebuild_schema(
         cls,
         connection: sqlite3.Connection,
         tables: set[str],
+        *,
+        source_version: int,
     ) -> None:
         ordered_tables = (
             "sync_subscriptions",
@@ -274,14 +290,16 @@ class SQLiteAutomationRepository:
             for row in source_rows["automation_sync_runs"]
         ]
 
-        backup_tables = {table: f"{table}_automation_v1_backup" for table in ordered_tables}
+        backup_tables = {
+            table: f"{table}_automation_v{source_version}_backup" for table in ordered_tables
+        }
         for target in backup_tables.values():
             if target in tables:
                 raise ValueError("interrupted automation migration requires manual recovery")
         for table in reversed(ordered_tables):
             connection.execute(f"ALTER TABLE {table} RENAME TO {backup_tables[table]}")
 
-        cls._create_v2_schema(connection)
+        cls._create_schema(connection)
         for row in source_rows["sync_subscriptions"]:
             connection.execute(
                 "INSERT INTO sync_subscriptions VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -348,7 +366,7 @@ class SQLiteAutomationRepository:
             )
 
         for table, backup in backup_tables.items():
-            trigger_base = f"protect_{table}_automation_v1_backup"
+            trigger_base = f"protect_{table}_automation_v{source_version}_backup"
             for operation in ("INSERT", "UPDATE", "DELETE"):
                 connection.execute(
                     f"""
@@ -376,6 +394,7 @@ class SQLiteAutomationRepository:
             status = row["status"]
             lease_expires_at = None
             lease_owner = None
+            lease_token = None
             if status == "running":
                 if "lease_expires_at" in columns and row["lease_expires_at"] is not None:
                     lease_expires_at = cls._datetime(
@@ -386,6 +405,14 @@ class SQLiteAutomationRepository:
                     lease_expires_at = started_at
                 if "lease_owner" in columns:
                     lease_owner = row["lease_owner"]
+                if "lease_token" in columns and row["lease_token"] is not None:
+                    lease_token = row["lease_token"]
+                else:
+                    lease_token = cls._identifier(
+                        "migrated-lease-token",
+                        row["run_id"],
+                        started_at.isoformat(),
+                    )
             updated_at = completed_at or started_at
             if "updated_at" in columns and row["updated_at"] is not None:
                 updated_at = cls._datetime(
@@ -402,6 +429,7 @@ class SQLiteAutomationRepository:
                 completed_at=completed_at,
                 error=row["error"],
                 request_key=row["request_key"] if "request_key" in columns else None,
+                lease_token=lease_token,
                 lease_owner=lease_owner,
                 lease_expires_at=lease_expires_at,
                 updated_at=updated_at,
@@ -570,6 +598,7 @@ class SQLiteAutomationRepository:
                         status="running",
                         started_at=claimed_at,
                         request_key=request_key,
+                        lease_token=uuid4().hex,
                         lease_owner=owner,
                         lease_expires_at=lease_expires_at,
                         updated_at=claimed_at,
@@ -622,7 +651,6 @@ class SQLiteAutomationRepository:
         lease_duration: timedelta = timedelta(minutes=15),
     ) -> SyncRun:
         started_at = self._datetime(now, "now")
-        lease_expires_at = self._lease_expiry(started_at, lease_duration)
         if not reason.strip():
             raise ValueError("reason must not be blank")
         if request_key is None and reason == "schedule":
@@ -631,6 +659,8 @@ class SQLiteAutomationRepository:
             raise ValueError("request_key must not be blank")
         if owner is not None and not owner.strip():
             raise ValueError("owner must not be blank")
+        is_leased = reason == "schedule" or owner is not None
+        lease_expires_at = self._lease_expiry(started_at, lease_duration) if is_leased else None
         run = SyncRun(
             run_id=self._identifier("sync-run", request_key) if request_key else uuid4().hex,
             athlete_id=subscription.athlete_id,
@@ -639,6 +669,7 @@ class SQLiteAutomationRepository:
             status="running",
             started_at=started_at,
             request_key=request_key,
+            lease_token=uuid4().hex if is_leased else None,
             lease_owner=owner,
             lease_expires_at=lease_expires_at,
             updated_at=started_at,
@@ -677,9 +708,9 @@ class SQLiteAutomationRepository:
             """
             INSERT INTO automation_sync_runs (
                 run_id, athlete_id, source, reason, status, started_at,
-                completed_at, error, request_key, lease_owner, lease_expires_at,
-                updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                completed_at, error, request_key, lease_token, lease_owner,
+                lease_expires_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 run.run_id,
@@ -691,18 +722,26 @@ class SQLiteAutomationRepository:
                 run.completed_at.isoformat() if run.completed_at is not None else None,
                 run.error,
                 run.request_key,
+                run.lease_token,
                 run.lease_owner,
                 run.lease_expires_at.isoformat() if run.lease_expires_at is not None else None,
                 run.updated_at.isoformat() if run.updated_at is not None else None,
             ),
         )
 
-    def complete_sync_run(self, run_id: str, *, completed_at: datetime) -> SyncRun:
+    def complete_sync_run(
+        self,
+        run_id: str,
+        *,
+        completed_at: datetime,
+        lease_token: str | None = None,
+    ) -> SyncRun:
         return self._finish_sync_run(
             run_id,
             status="completed",
             completed_at=completed_at,
             error=None,
+            lease_token=lease_token,
         )
 
     def fail_sync_run(
@@ -711,6 +750,7 @@ class SQLiteAutomationRepository:
         *,
         error: str,
         completed_at: datetime,
+        lease_token: str | None = None,
     ) -> SyncRun:
         if not error.strip():
             raise ValueError("error must not be blank")
@@ -719,6 +759,7 @@ class SQLiteAutomationRepository:
             status="failed",
             completed_at=completed_at,
             error=error,
+            lease_token=lease_token,
         )
 
     def _finish_sync_run(
@@ -728,6 +769,7 @@ class SQLiteAutomationRepository:
         status: str,
         completed_at: datetime,
         error: str | None,
+        lease_token: str | None,
     ) -> SyncRun:
         completed = self._datetime(completed_at, "completed_at")
         connection = self._connect()
@@ -740,6 +782,12 @@ class SQLiteAutomationRepository:
             if row is None:
                 raise KeyError(run_id)
             existing = self._sync_run_from_row(row)
+            if existing.status == "running":
+                if existing.lease_token != lease_token:
+                    raise ValueError("sync run lease token conflict")
+                assert existing.updated_at is not None
+                if completed < existing.updated_at:
+                    raise ValueError("completed_at must not be earlier than updated_at")
             candidate = SyncRun(
                 run_id=existing.run_id,
                 athlete_id=existing.athlete_id,
@@ -761,10 +809,23 @@ class SQLiteAutomationRepository:
                 """
                 UPDATE automation_sync_runs
                 SET status = ?, completed_at = ?, error = ?,
-                    lease_owner = NULL, lease_expires_at = NULL, updated_at = ?
+                    lease_token = NULL, lease_owner = NULL,
+                    lease_expires_at = NULL, updated_at = ?
                 WHERE run_id = ? AND status = 'running'
+                  AND (
+                      (lease_token IS NULL AND ? IS NULL)
+                      OR lease_token = ?
+                  )
                 """,
-                (status, completed.isoformat(), error, completed.isoformat(), run_id),
+                (
+                    status,
+                    completed.isoformat(),
+                    error,
+                    completed.isoformat(),
+                    run_id,
+                    lease_token,
+                    lease_token,
+                ),
             )
             if cursor.rowcount != 1:
                 raise ValueError("sync run terminal state conflict")
@@ -841,24 +902,104 @@ class SQLiteAutomationRepository:
             existing = self._sync_run_from_row(row)
             if existing.status != "running":
                 raise ValueError("only running sync runs can be reclaimed")
+            if existing.lease_token is None:
+                raise ValueError("unleased sync runs cannot be reclaimed")
             if existing.lease_expires_at is not None and existing.lease_expires_at > reclaimed_at:
                 raise ValueError("sync run lease is still active")
+            assert existing.updated_at is not None
+            if reclaimed_at < existing.updated_at:
+                raise ValueError("reclaim time must not be earlier than updated_at")
+            lease_token = uuid4().hex
             cursor = connection.execute(
                 """
                 UPDATE automation_sync_runs
-                SET lease_owner = ?, lease_expires_at = ?, updated_at = ?
-                WHERE run_id = ? AND status = 'running' AND lease_expires_at <= ?
+                SET lease_token = ?, lease_owner = ?, lease_expires_at = ?, updated_at = ?
+                WHERE run_id = ? AND status = 'running'
+                  AND lease_token = ? AND lease_expires_at <= ?
                 """,
                 (
+                    lease_token,
                     owner,
                     lease_expires_at.isoformat(),
                     reclaimed_at.isoformat(),
                     run_id,
+                    existing.lease_token,
                     reclaimed_at.isoformat(),
                 ),
             )
             if cursor.rowcount != 1:
                 raise ValueError("sync run could not be reclaimed")
+            row = connection.execute(
+                "SELECT * FROM automation_sync_runs WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+            assert row is not None
+            result = self._sync_run_from_row(row)
+            connection.commit()
+            return result
+        except BaseException:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def renew_lease(
+        self,
+        run_id: str,
+        lease_token: str,
+        *,
+        owner: str,
+        now: datetime,
+        lease_duration: timedelta = timedelta(minutes=15),
+    ) -> SyncRun:
+        renewed_at = self._datetime(now, "now")
+        lease_expires_at = self._lease_expiry(renewed_at, lease_duration)
+        if not lease_token.strip():
+            raise ValueError("lease token must not be blank")
+        if not owner.strip():
+            raise ValueError("lease owner must not be blank")
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM automation_sync_runs WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(run_id)
+            existing = self._sync_run_from_row(row)
+            if existing.status != "running" or existing.lease_token != lease_token:
+                raise ValueError("sync run lease token conflict")
+            if existing.lease_owner != owner:
+                raise ValueError("sync run lease owner conflict")
+            assert existing.updated_at is not None
+            if renewed_at < existing.updated_at:
+                raise ValueError("renewal time must not be earlier than updated_at")
+            if existing.lease_expires_at is None or existing.lease_expires_at <= renewed_at:
+                raise ValueError("sync run lease has expired")
+            if lease_expires_at <= existing.lease_expires_at:
+                raise ValueError("renewal must extend the sync run lease")
+            cursor = connection.execute(
+                """
+                UPDATE automation_sync_runs
+                SET lease_expires_at = ?, updated_at = ?
+                WHERE run_id = ? AND status = 'running'
+                  AND lease_token = ? AND lease_owner = ?
+                  AND lease_expires_at > ? AND updated_at <= ?
+                """,
+                (
+                    lease_expires_at.isoformat(),
+                    renewed_at.isoformat(),
+                    run_id,
+                    lease_token,
+                    owner,
+                    renewed_at.isoformat(),
+                    renewed_at.isoformat(),
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("sync run lease renewal conflict")
             row = connection.execute(
                 "SELECT * FROM automation_sync_runs WHERE run_id = ?",
                 (run_id,),
@@ -1253,6 +1394,7 @@ class SQLiteAutomationRepository:
             else None,
             error=row["error"],
             request_key=row["request_key"],
+            lease_token=row["lease_token"],
             lease_owner=row["lease_owner"],
             lease_expires_at=datetime.fromisoformat(row["lease_expires_at"])
             if row["lease_expires_at"] is not None

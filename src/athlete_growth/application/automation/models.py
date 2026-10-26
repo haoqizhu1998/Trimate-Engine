@@ -43,23 +43,30 @@ class _FrozenJsonObject(Mapping[str, _FrozenJsonValue]):
     __slots__ = ("_identity", "_values")
 
     def __init__(self, values: dict[str, _FrozenJsonValue]) -> None:
-        self._values = values
-        self._identity = _json_identity(values)
+        object.__setattr__(self, "_values", tuple(values.items()))
+        object.__setattr__(self, "_identity", _json_identity(values))
+
+    def __setattr__(self, name: str, value: object) -> None:
+        del name, value
+        raise TypeError("frozen JSON values cannot be mutated")
 
     def __getitem__(self, key: str) -> _FrozenJsonValue:
-        return self._values[key]
+        for candidate, value in self._values:
+            if candidate == key:
+                return value
+        raise KeyError(key)
 
     def __iter__(self) -> Iterator[str]:
-        return iter(self._values)
+        return (key for key, _ in self._values)
 
     def __len__(self) -> int:
         return len(self._values)
 
     def __repr__(self) -> str:
-        return repr(self._values)
+        return repr(dict(self._values))
 
     def __eq__(self, other: object) -> bool:
-        return isinstance(other, Mapping) and self._identity == _json_identity(other)
+        return isinstance(other, _FrozenJsonObject) and self._identity == other._identity
 
     def __hash__(self) -> int:
         return hash(self._identity)
@@ -71,8 +78,12 @@ class _FrozenJsonArray(Sequence[_FrozenJsonValue]):
     __slots__ = ("_identity", "_values")
 
     def __init__(self, values: tuple[_FrozenJsonValue, ...]) -> None:
-        self._values = values
-        self._identity = _json_identity(values)
+        object.__setattr__(self, "_values", values)
+        object.__setattr__(self, "_identity", _json_identity(values))
+
+    def __setattr__(self, name: str, value: object) -> None:
+        del name, value
+        raise TypeError("frozen JSON values cannot be mutated")
 
     @overload
     def __getitem__(self, index: int) -> _FrozenJsonValue: ...
@@ -90,11 +101,7 @@ class _FrozenJsonArray(Sequence[_FrozenJsonValue]):
         return repr(self._values)
 
     def __eq__(self, other: object) -> bool:
-        return (
-            isinstance(other, Sequence)
-            and not isinstance(other, (str, bytes, bytearray))
-            and self._identity == _json_identity(other)
-        )
+        return isinstance(other, _FrozenJsonArray) and self._identity == other._identity
 
     def __hash__(self) -> int:
         return hash(self._identity)
@@ -201,6 +208,7 @@ class SyncRun:
     completed_at: datetime | None = None
     error: str | None = None
     request_key: str | None = None
+    lease_token: str | None = None
     lease_owner: str | None = None
     lease_expires_at: datetime | None = None
     updated_at: datetime | None = None
@@ -217,6 +225,8 @@ class SyncRun:
                 raise ValueError("completed_at must not be earlier than started_at")
         if self.request_key is not None:
             _require_text(self.request_key, "request_key")
+        if self.lease_token is not None:
+            _require_text(self.lease_token, "lease_token")
         if self.lease_owner is not None:
             _require_text(self.lease_owner, "lease_owner")
         if self.lease_expires_at is not None:
@@ -237,8 +247,22 @@ class SyncRun:
             raise ValueError("a completed sync cannot have an error")
         if self.status == "failed" and (self.error is None or not self.error.strip()):
             raise ValueError("a failed sync must have an error")
+        if (
+            self.status == "running"
+            and self.lease_token is None
+            and (self.lease_owner is not None or self.lease_expires_at is not None)
+        ):
+            raise ValueError("an unleased sync cannot have lease metadata")
+        if (
+            self.status == "running"
+            and self.lease_token is not None
+            and self.lease_expires_at is None
+        ):
+            raise ValueError("a leased sync must have lease_expires_at")
         if self.status != "running" and (
-            self.lease_owner is not None or self.lease_expires_at is not None
+            self.lease_token is not None
+            or self.lease_owner is not None
+            or self.lease_expires_at is not None
         ):
             raise ValueError("a finished sync cannot hold a lease")
 
