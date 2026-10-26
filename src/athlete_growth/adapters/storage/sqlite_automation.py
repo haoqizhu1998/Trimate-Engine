@@ -10,7 +10,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
 from athlete_growth.application.automation import (
@@ -21,8 +21,10 @@ from athlete_growth.application.automation import (
     SyncSubscription,
     UserNotification,
 )
-from athlete_growth.application.ingest.service import IngestionResult
 from athlete_growth.domain.records import JsonValue
+
+if TYPE_CHECKING:
+    from athlete_growth.application.ingest.service import IngestionResult
 
 
 class SQLiteAutomationRepository:

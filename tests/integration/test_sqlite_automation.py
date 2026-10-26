@@ -1,18 +1,24 @@
 from __future__ import annotations
 
 import gc
+import subprocess
+import sys
 import unittest
 import warnings
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import cast
 
 from athlete_growth.adapters.storage.sqlite_automation import SQLiteAutomationRepository
 from athlete_growth.application.automation import (
+    AnalysisSnapshot,
     NotificationMode,
     SyncSubscription,
+    UserNotification,
 )
 from athlete_growth.application.ingest.service import IngestionResult
+from athlete_growth.domain.records import JsonValue
 
 
 class SQLiteAutomationRepositoryTests(unittest.TestCase):
@@ -262,6 +268,76 @@ class SQLiteAutomationRepositoryTests(unittest.TestCase):
                 repository.save_subscription(
                     self.subscription,
                     next_run_at=datetime(2026, 10, 26, 12, 0),
+                )
+
+    def test_ingestion_service_imports_before_storage_repository_in_fresh_process(self) -> None:
+        probe = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "from athlete_growth.application.ingest.service "
+                    "import IngestionService; "
+                    "from athlete_growth.adapters.storage "
+                    "import SQLiteAutomationRepository; "
+                    "print(IngestionService.__name__, SQLiteAutomationRepository.__name__)"
+                ),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(probe.returncode, 0, probe.stderr)
+        self.assertEqual(probe.stdout.strip(), "IngestionService SQLiteAutomationRepository")
+
+    def test_analysis_snapshot_report_is_deeply_immutable(self) -> None:
+        payload: dict[str, JsonValue] = {
+            "period": "2026-10-26",
+            "details": {
+                "score": 82,
+                "signals": [{"name": "load", "value": 12}],
+            },
+        }
+        snapshot = AnalysisSnapshot(
+            snapshot_id="snapshot-001",
+            change_set_id="change-set-001",
+            athlete_id="athlete-001",
+            period="2026-10-26",
+            report=payload,
+            risk_level="low",
+            created_at=self.now,
+        )
+        details = cast(dict[str, JsonValue], snapshot.report["details"])
+        signals = cast(list[JsonValue], details["signals"])
+        first_signal = cast(dict[str, JsonValue], signals[0])
+
+        with self.assertRaises(TypeError):
+            snapshot.report["period"] = "changed"
+        with self.assertRaises(TypeError):
+            details["score"] = 0
+        with self.assertRaises(TypeError):
+            signals.append("changed")
+        with self.assertRaises(TypeError):
+            first_signal["value"] = 0
+
+        cast(dict[str, JsonValue], payload["details"])["score"] = 0
+        self.assertEqual(details["score"], 82)
+
+    def test_notification_delivery_attempts_require_a_non_bool_non_negative_integer(self) -> None:
+        values: tuple[object, ...] = (True, 1.5, -1)
+        for value in values:
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                UserNotification(
+                    notification_id="notification-001",
+                    snapshot_id="snapshot-001",
+                    athlete_id="athlete-001",
+                    priority="digest",
+                    title="Training analysis ready",
+                    body="Open the product to review your analysis.",
+                    deliver_after=None,
+                    created_at=self.now,
+                    delivery_attempts=value,  # type: ignore[arg-type]
                 )
 
     def test_database_operations_do_not_leak_connections(self) -> None:

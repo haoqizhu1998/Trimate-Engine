@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date, datetime
 from enum import StrEnum
-from typing import cast
+from typing import Never, Self, cast
 
 from athlete_growth.domain.records import JsonValue
 
@@ -32,6 +33,94 @@ def _require_positive_int(value: int, field_name: str) -> None:
         raise ValueError(f"{field_name} must be a positive integer")
 
 
+class _FrozenJsonObject(dict[str, JsonValue]):
+    """A JSON object that preserves dict compatibility without allowing mutation."""
+
+    @staticmethod
+    def _immutable() -> Never:
+        raise TypeError("frozen JSON values cannot be mutated")
+
+    def __setitem__(self, key: str, value: JsonValue) -> None:
+        self._immutable()
+
+    def __delitem__(self, key: str) -> None:
+        self._immutable()
+
+    def __ior__(self, value: object) -> Self:
+        self._immutable()
+
+    def clear(self) -> None:
+        self._immutable()
+
+    def pop(self, *args: object, **kwargs: object) -> JsonValue:
+        self._immutable()
+
+    def popitem(self) -> tuple[str, JsonValue]:
+        self._immutable()
+
+    def setdefault(self, key: str, default: JsonValue = None) -> JsonValue:
+        self._immutable()
+
+    def update(self, *args: object, **kwargs: JsonValue) -> None:
+        self._immutable()
+
+
+class _FrozenJsonArray(list[JsonValue]):
+    """A JSON array that preserves list compatibility without allowing mutation."""
+
+    @staticmethod
+    def _immutable() -> Never:
+        raise TypeError("frozen JSON values cannot be mutated")
+
+    def __setitem__(
+        self,
+        index: object,
+        value: object,
+    ) -> None:
+        self._immutable()
+
+    def __delitem__(self, index: object) -> None:
+        self._immutable()
+
+    def __iadd__(self, values: Iterable[JsonValue]) -> Self:
+        self._immutable()
+
+    def __imul__(self, value: object) -> Self:
+        self._immutable()
+
+    def append(self, value: JsonValue) -> None:
+        self._immutable()
+
+    def clear(self) -> None:
+        self._immutable()
+
+    def extend(self, values: Iterable[JsonValue]) -> None:
+        self._immutable()
+
+    def insert(self, index: object, value: JsonValue) -> None:
+        self._immutable()
+
+    def pop(self, index: object = -1) -> JsonValue:
+        self._immutable()
+
+    def remove(self, value: JsonValue) -> None:
+        self._immutable()
+
+    def reverse(self) -> None:
+        self._immutable()
+
+    def sort(self, *args: object, **kwargs: object) -> None:
+        self._immutable()
+
+
+def _freeze_json(value: JsonValue) -> JsonValue:
+    if isinstance(value, dict):
+        return _FrozenJsonObject({key: _freeze_json(item) for key, item in value.items()})
+    if isinstance(value, list):
+        return _FrozenJsonArray(_freeze_json(item) for item in value)
+    return value
+
+
 def _copy_json_object(value: dict[str, JsonValue]) -> dict[str, JsonValue]:
     try:
         encoded = json.dumps(
@@ -43,7 +132,8 @@ def _copy_json_object(value: dict[str, JsonValue]) -> dict[str, JsonValue]:
         )
     except (TypeError, ValueError) as exc:
         raise ValueError("report must contain only JSON values") from exc
-    return cast(dict[str, JsonValue], json.loads(encoded))
+    decoded = cast(dict[str, JsonValue], json.loads(encoded))
+    return _FrozenJsonObject({key: _freeze_json(item) for key, item in decoded.items()})
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,7 +262,11 @@ class UserNotification:
             if value is not None:
                 _require_aware(value, field_name)
         _require_aware(self.created_at, "created_at")
-        if self.delivery_attempts < 0:
-            raise ValueError("delivery_attempts must not be negative")
+        if (
+            isinstance(self.delivery_attempts, bool)
+            or not isinstance(self.delivery_attempts, int)
+            or self.delivery_attempts < 0
+        ):
+            raise ValueError("delivery_attempts must be a non-negative integer")
         if self.last_error is not None and not self.last_error.strip():
             raise ValueError("last_error must not be blank")
