@@ -1980,17 +1980,36 @@ class SQLiteAutomationRepository:
             lease_expires_at = self._lease_expiry(claimed_at, lease_duration)
             rows = connection.execute(
                 """
-                SELECT notification_id FROM notification_inbox
-                WHERE delivered_at IS NULL
-                  AND next_attempt_at <= ?
+                SELECT notification_inbox.notification_id
+                FROM notification_inbox
+                JOIN analysis_snapshots
+                  ON analysis_snapshots.snapshot_id = notification_inbox.snapshot_id
+                JOIN data_change_sets
+                  ON data_change_sets.change_set_id = analysis_snapshots.change_set_id
+                LEFT JOIN sync_subscriptions
+                  ON sync_subscriptions.athlete_id = data_change_sets.athlete_id
+                 AND sync_subscriptions.source = data_change_sets.source
+                WHERE notification_inbox.delivered_at IS NULL
+                  AND notification_inbox.next_attempt_at <= ?
                   AND (
-                      delivery_lease_token IS NULL
-                      OR delivery_lease_expires_at <= ?
+                      notification_inbox.delivery_lease_token IS NULL
+                      OR notification_inbox.delivery_lease_expires_at <= ?
                   )
-                ORDER BY next_attempt_at, created_at, notification_id
+                  AND (
+                      sync_subscriptions.notification_mode IS NULL
+                      OR sync_subscriptions.notification_mode != ?
+                  )
+                ORDER BY notification_inbox.next_attempt_at,
+                         notification_inbox.created_at,
+                         notification_inbox.notification_id
                 LIMIT ?
                 """,
-                (claimed_at.isoformat(), claimed_at.isoformat(), limit),
+                (
+                    claimed_at.isoformat(),
+                    claimed_at.isoformat(),
+                    NotificationMode.OFF.value,
+                    limit,
+                ),
             ).fetchall()
             claimed: list[UserNotification] = []
             for row in rows:
@@ -2055,13 +2074,41 @@ class SQLiteAutomationRepository:
             connection.execute("BEGIN IMMEDIATE")
             renewed_at = self._lease_time(lease_clock, fallback_now, "now")
             row = connection.execute(
-                "SELECT * FROM notification_inbox WHERE notification_id = ?",
+                """
+                SELECT notification_inbox.*,
+                       sync_subscriptions.notification_mode AS current_notification_mode
+                FROM notification_inbox
+                JOIN analysis_snapshots
+                  ON analysis_snapshots.snapshot_id = notification_inbox.snapshot_id
+                JOIN data_change_sets
+                  ON data_change_sets.change_set_id = analysis_snapshots.change_set_id
+                LEFT JOIN sync_subscriptions
+                  ON sync_subscriptions.athlete_id = data_change_sets.athlete_id
+                 AND sync_subscriptions.source = data_change_sets.source
+                WHERE notification_inbox.notification_id = ?
+                """,
                 (notification_id,),
             ).fetchone()
             if row is None:
                 raise KeyError(notification_id)
             existing = self._notification_from_row(row)
             self._validate_delivery_claim(existing, lease_token, owner, renewed_at)
+            if row["current_notification_mode"] == NotificationMode.OFF.value:
+                cursor = connection.execute(
+                    """
+                    UPDATE notification_inbox
+                    SET delivery_lease_token = NULL,
+                        delivery_lease_owner = NULL,
+                        delivery_lease_expires_at = NULL
+                    WHERE notification_id = ? AND delivered_at IS NULL
+                      AND delivery_lease_token = ? AND delivery_lease_owner = ?
+                    """,
+                    (notification_id, lease_token, owner),
+                )
+                if cursor.rowcount != 1:
+                    raise ValueError("notification delivery lease conflict")
+                connection.commit()
+                raise ValueError("notification delivery suppressed by current policy")
             lease_expires_at = self._lease_expiry(renewed_at, lease_duration)
             cursor = connection.execute(
                 """

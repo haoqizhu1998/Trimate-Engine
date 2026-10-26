@@ -230,6 +230,44 @@ class AutomaticTrainingLoopTests(unittest.TestCase):
         assert row is not None
         return int(row[0])
 
+    def set_notification_mode(
+        self,
+        source: str,
+        mode: NotificationMode,
+        *,
+        athlete_id: str = "athlete-001",
+    ) -> None:
+        subscription = self.automation.get_subscription(athlete_id, source)
+        next_run_at = self.automation.get_next_run_at(athlete_id, source)
+        assert subscription is not None and next_run_at is not None
+        self.automation.save_subscription(
+            replace(subscription, notification_mode=mode),
+            next_run_at=next_run_at,
+        )
+
+    def queue_future_digest(self, source: str = "watch") -> str:
+        self.add_profile()
+        self.add_subscription(source)
+        connector = MutableConnector(
+            source,
+            (
+                _record(
+                    source,
+                    "check-in",
+                    "queued-digest",
+                    occurred_at=datetime(2026, 10, 26, 8, 0, tzinfo=UTC),
+                    pain=0,
+                ),
+            ),
+        )
+
+        result = self.loop({source: connector}).run_once(limit=1)
+
+        self.assertEqual((result.notifications, result.delivered), (1, 0))
+        notification = self.automation.list_unread("athlete-001")[0]
+        self.assertEqual(notification.deliver_after, datetime(2026, 10, 26, 15, 0, tzinfo=UTC))
+        return notification.notification_id
+
     def test_loop_rejects_record_store_from_a_different_database(self) -> None:
         other_records = SQLiteRecordStore(self.root / "other.sqlite3")
 
@@ -584,6 +622,107 @@ class AutomaticTrainingLoopTests(unittest.TestCase):
         self.assertEqual((third_delivery.delivered, third_delivery.failed), (1, 0))
         self.assertIsNotNone(delivered.delivered_at)
         self.assertEqual(delivered.delivery_attempts, 2)
+
+    def test_off_policy_suppresses_an_existing_due_digest_without_deleting_it(self) -> None:
+        notification_id = self.queue_future_digest()
+        self.set_notification_mode("watch", NotificationMode.OFF)
+        self.clock.now = datetime(2026, 10, 26, 15, 0, tzinfo=UTC)
+        sink = RecordingSink()
+
+        summary = self.loop({}, sink).deliver_pending()
+
+        notification = self.automation.get_notification(notification_id)
+        assert notification is not None
+        self.assertEqual((summary.attempted, summary.delivered, summary.failed), (0, 0, 0))
+        self.assertEqual(sink.delivered, [])
+        self.assertIsNone(notification.delivered_at)
+        self.assertEqual(
+            [item.notification_id for item in self.automation.list_unread("athlete-001")],
+            [notification_id],
+        )
+        self.assertEqual(
+            [item.notification_id for item in self.automation.list_pending(self.clock())],
+            [notification_id],
+        )
+
+    def test_off_policy_releases_a_claim_if_configuration_changes_before_sink(self) -> None:
+        notification_id = self.queue_future_digest()
+        self.clock.now = datetime(2026, 10, 26, 15, 0, tzinfo=UTC)
+        parent = self
+
+        class DisableAfterClaimRepository(SQLiteAutomationRepository):
+            disabled = False
+
+            def claim_pending(self, *args, **kwargs):
+                claimed = super().claim_pending(*args, **kwargs)
+                if claimed and not self.disabled:
+                    self.disabled = True
+                    parent.set_notification_mode("watch", NotificationMode.OFF)
+                return claimed
+
+        repository = DisableAfterClaimRepository(self.database_file)
+        sink = RecordingSink()
+        loop = AutomaticTrainingLoop(
+            automation_repository=repository,
+            record_store=SQLiteRecordStore(self.database_file),
+            profile_repository=self.profiles,
+            connectors={},
+            raw_root=self.root / "raw",
+            notification_sink=sink,
+            clock=self.clock,
+            owner="policy-race-worker",
+        )
+
+        summary = loop.deliver_pending(limit=1)
+
+        notification = repository.get_notification(notification_id)
+        assert notification is not None
+        self.assertEqual((summary.attempted, summary.delivered, summary.failed), (1, 0, 1))
+        self.assertEqual(sink.delivered, [])
+        self.assertIsNone(notification.delivered_at)
+        self.assertIsNone(notification.delivery_lease_token)
+        self.assertIsNone(notification.delivery_lease_owner)
+        self.assertIsNone(notification.delivery_lease_expires_at)
+
+    def test_reenabling_policy_makes_a_suppressed_digest_deliverable(self) -> None:
+        notification_id = self.queue_future_digest()
+        self.set_notification_mode("watch", NotificationMode.OFF)
+        self.clock.now = datetime(2026, 10, 26, 15, 0, tzinfo=UTC)
+        self.assertEqual(
+            self.automation.claim_pending(self.clock(), owner="suppressed-worker"),
+            [],
+        )
+        self.set_notification_mode("watch", NotificationMode.ACTIONABLE_DIGEST)
+        sink = RecordingSink()
+
+        summary = self.loop({}, sink).deliver_pending()
+
+        notification = self.automation.get_notification(notification_id)
+        assert notification is not None
+        self.assertEqual((summary.attempted, summary.delivered, summary.failed), (1, 1, 0))
+        self.assertEqual(
+            [item.notification_id for item in sink.delivered],
+            [notification_id],
+        )
+        self.assertIsNotNone(notification.delivered_at)
+
+    def test_notification_without_a_current_subscription_keeps_delivery_behavior(self) -> None:
+        notification_id = self.queue_future_digest()
+        with sqlite3.connect(self.database_file) as connection:
+            connection.execute(
+                "DELETE FROM sync_subscriptions WHERE athlete_id = ? AND source = ?",
+                ("athlete-001", "watch"),
+            )
+        self.clock.now = datetime(2026, 10, 26, 15, 0, tzinfo=UTC)
+        sink = RecordingSink()
+
+        summary = self.loop({}, sink).deliver_pending()
+
+        self.assertEqual((summary.attempted, summary.delivered, summary.failed), (1, 1, 0))
+        self.assertEqual(
+            [item.notification_id for item in sink.delivered],
+            [notification_id],
+        )
 
     def test_delivery_failure_does_not_starve_the_next_notification(self) -> None:
         connectors = {}
