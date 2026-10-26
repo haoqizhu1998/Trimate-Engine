@@ -5,6 +5,7 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from athlete_growth.adapters.garmin_cn.connector import GarminCnConnector
 from athlete_growth.adapters.storage import SQLiteRecordStore
 from athlete_growth.application.ingest import service
 from athlete_growth.ports import data_source
@@ -166,6 +167,29 @@ class IngestionTests(unittest.TestCase):
             self.assertTrue(any((root / "raw").rglob("*.json")))
             self.assertEqual(store.get_cursor("athlete-001", "file"), "cursor-1")
 
+    def test_garmin_daily_record_uses_canonical_date_across_utc_boundary(self) -> None:
+        raw = GarminCnConnector._to_raw(
+            {
+                "kind": "daily-summary",
+                "source_id": "2026-10-26",
+                "occurred_at": "2026-10-26T00:00:00+08:00",
+                "payload": {"calendarDate": "2026-10-26", "totalSteps": 9000},
+            }
+        )
+        self.assertEqual(raw.occurred_at, datetime(2026, 10, 25, 16, 0, tzinfo=UTC))
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            ingestion = service.IngestionService(
+                athlete_id="athlete-001",
+                store=SQLiteRecordStore(root / "athlete.sqlite3"),
+                raw_dir=root / "raw",
+            )
+
+            result = ingestion.ingest(data_source.SyncBatch((raw,)))
+
+        self.assertEqual(result.affected_dates, (date(2026, 10, 26),))
+
     def test_source_capabilities_validate_poll_interval(self) -> None:
         poll = data_source.SourceCapabilities(
             "garmin-cn",
@@ -192,6 +216,29 @@ class IngestionTests(unittest.TestCase):
                 delivery_mode="manual",
                 suggested_poll_minutes=30,
             )
+
+    def test_source_capabilities_reject_unknown_delivery_mode(self) -> None:
+        with self.assertRaisesRegex(ValueError, "delivery_mode"):
+            data_source.SourceCapabilities(
+                "future-source",
+                None,
+                ("activity",),
+                delivery_mode="stream",  # type: ignore[arg-type]
+            )
+
+    def test_source_capabilities_require_integer_poll_interval(self) -> None:
+        for invalid_interval in (True, "30"):
+            with (
+                self.subTest(invalid_interval=invalid_interval),
+                self.assertRaisesRegex(TypeError, "integer"),
+            ):
+                data_source.SourceCapabilities(
+                    "garmin-cn",
+                    "cn",
+                    ("daily-summary",),
+                    delivery_mode="poll",
+                    suggested_poll_minutes=invalid_interval,  # type: ignore[arg-type]
+                )
 
     def test_stores_raw_vendor_payload_and_uses_separate_canonical_payload(self) -> None:
         occurred_at = datetime(2026, 10, 26, 8, 0, tzinfo=UTC)

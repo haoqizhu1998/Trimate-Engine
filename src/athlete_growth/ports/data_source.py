@@ -20,12 +20,17 @@ class SourceCapabilities:
     suggested_poll_minutes: int | None = None
 
     def __post_init__(self) -> None:
-        if (
-            self.suggested_poll_minutes is not None
-            and self.suggested_poll_minutes <= 0
+        if self.delivery_mode not in {"push", "poll", "manual"}:
+            raise ValueError("delivery_mode must be 'push', 'poll', or 'manual'")
+        if self.suggested_poll_minutes is None:
+            return
+        if isinstance(self.suggested_poll_minutes, bool) or not isinstance(
+            self.suggested_poll_minutes, int
         ):
+            raise TypeError("suggested_poll_minutes must be an integer")
+        if self.suggested_poll_minutes <= 0:
             raise ValueError("suggested_poll_minutes must be positive")
-        if self.suggested_poll_minutes is not None and self.delivery_mode != "poll":
+        if self.delivery_mode != "poll":
             raise ValueError(
                 "only poll sources may declare suggested_poll_minutes"
             )

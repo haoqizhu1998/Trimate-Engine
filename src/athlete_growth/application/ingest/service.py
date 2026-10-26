@@ -97,7 +97,7 @@ class IngestionService:
             retired += len(retired_records)
             for record in retired_records:
                 changed_record_ids.add(record.record_id)
-                affected_dates.add(record.occurred_at.date())
+                affected_dates.add(self._affected_date(record))
             existing_versions = current_by_source.get(source_key, [])
             existing = next(
                 (
@@ -113,7 +113,7 @@ class IngestionService:
                 self.store.retire(extra.record_id)
                 retired += 1
                 changed_record_ids.add(extra.record_id)
-                affected_dates.add(extra.occurred_at.date())
+                affected_dates.add(self._affected_date(extra))
             if existing is not None and self._equivalent(existing, candidate):
                 current_by_source[source_key] = [existing]
                 duplicates += 1
@@ -132,13 +132,13 @@ class IngestionService:
                 current_by_source[source_key] = [replacement]
                 updated += 1
                 changed_record_ids.add(replacement.record_id)
-                affected_dates.add(existing.occurred_at.date())
-                affected_dates.add(replacement.occurred_at.date())
+                affected_dates.add(self._affected_date(existing))
+                affected_dates.add(self._affected_date(replacement))
             elif self.store.save(candidate):
                 current_by_source[source_key] = [candidate]
                 inserted += 1
                 changed_record_ids.add(candidate.record_id)
-                affected_dates.add(candidate.occurred_at.date())
+                affected_dates.add(self._affected_date(candidate))
             else:
                 duplicates += 1
         if batch.next_cursor is not None:
@@ -219,6 +219,16 @@ class IngestionService:
             and existing.schema_version == candidate.schema_version
             and evidence_identity(existing) == evidence_identity(candidate)
         )
+
+    @staticmethod
+    def _affected_date(record: CanonicalRecord) -> date:
+        calendar_date = record.data.get("calendar_date")
+        if isinstance(calendar_date, str):
+            try:
+                return date.fromisoformat(calendar_date)
+            except ValueError:
+                pass
+        return record.occurred_at.date()
 
     def sync(
         self,
