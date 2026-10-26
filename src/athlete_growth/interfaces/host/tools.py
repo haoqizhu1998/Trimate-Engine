@@ -32,7 +32,20 @@ DEFAULT_INTERVAL_MINUTES = 30
 DEFAULT_LOOKBACK_DAYS = 3
 DEFAULT_NOTIFICATION_MODE = NotificationMode.ACTIONABLE_DIGEST
 DEFAULT_DIGEST_HOUR_LOCAL = 20
-_ERROR_CLASS = re.compile(r"[A-Za-z_][A-Za-z0-9_.]{0,127}")
+_SANITIZED_SYNC_ERROR = re.compile(
+    r"(?P<error_class>[A-Za-z_][A-Za-z0-9_]{0,63}): automatic sync failed"
+)
+_SAFE_ERROR_CLASSES = frozenset(
+    {
+        "ConnectionError",
+        "FileNotFoundError",
+        "OSError",
+        "PermissionError",
+        "RuntimeError",
+        "TimeoutError",
+        "ValueError",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -187,7 +200,7 @@ def run_automation_once(
         clock=active_clock,
         owner="automation-host",
     )
-    return asdict(loop.run_once())
+    return asdict(loop.run_once(claim_reason="force" if force else "schedule"))
 
 
 def list_notifications(
@@ -221,17 +234,17 @@ def read_notification(
 
 
 def install_macos_automation(data_home: str | Path) -> dict[str, object]:
-    runtime = _HostRuntime.load(data_home)
+    home = Path(data_home).expanduser().resolve()
     return MacOSLaunchdScheduler(
-        data_home=runtime.home,
+        data_home=home,
         python_executable=Path(sys.executable),
     ).install()
 
 
 def uninstall_macos_automation(data_home: str | Path) -> dict[str, object]:
-    runtime = _HostRuntime.load(data_home)
+    home = Path(data_home).expanduser().resolve()
     return MacOSLaunchdScheduler(
-        data_home=runtime.home,
+        data_home=home,
         python_executable=Path(sys.executable),
     ).uninstall()
 
@@ -252,8 +265,9 @@ def _run_view(run: SyncRun | None) -> dict[str, object] | None:
         return None
     error_class = None
     if run.error:
-        candidate = run.error.partition(":")[0].strip()
-        error_class = candidate if _ERROR_CLASS.fullmatch(candidate) else "AutomationError"
+        match = _SANITIZED_SYNC_ERROR.fullmatch(run.error)
+        candidate = match.group("error_class") if match is not None else None
+        error_class = candidate if candidate in _SAFE_ERROR_CLASSES else "UnknownError"
     return {
         "status": run.status,
         "started_at": run.started_at.isoformat(),

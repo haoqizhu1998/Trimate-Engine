@@ -749,12 +749,14 @@ class SQLiteAutomationRepository:
             for row in rows:
                 subscription = self._subscription_from_row(row)
                 scheduled_at = datetime.fromisoformat(row["next_run_at"])
-                request_key = self._identifier(
-                    "sync-request",
+                request_parts = [
                     subscription.athlete_id,
                     subscription.source,
                     scheduled_at.isoformat(),
-                )
+                ]
+                if reason != "schedule":
+                    request_parts.append(reason)
+                request_key = self._identifier("sync-request", *request_parts)
                 run_row = connection.execute(
                     "SELECT * FROM automation_sync_runs WHERE request_key = ?",
                     (request_key,),

@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from threading import Event
+from threading import Event, Lock
 from unittest.mock import patch
 
 from athlete_growth.adapters.storage import (
@@ -54,12 +54,22 @@ class EmptyGarminConnector:
 class BlockingGarminConnector(EmptyGarminConnector):
     started = Event()
     release = Event()
+    calls = 0
+    calls_lock = Lock()
 
     def sync(self, window: SyncWindow, cursor: str | None) -> SyncBatch:
+        with self.calls_lock:
+            type(self).calls += 1
         self.started.set()
         if not self.release.wait(timeout=5):
             raise TimeoutError("test did not release connector")
         return super().sync(window, cursor)
+
+
+class FailingGarminConnector(EmptyGarminConnector):
+    def sync(self, window: SyncWindow, cursor: str | None) -> SyncBatch:
+        del window, cursor
+        raise ConnectionError("vendor included a secret in the original error")
 
 
 class AutomationHostAndCLITests(unittest.TestCase):
@@ -153,6 +163,27 @@ class AutomationHostAndCLITests(unittest.TestCase):
         ):
             self.assertNotIn(secret, encoded)
 
+    def test_status_maps_unknown_error_prefix_to_fixed_safe_value(self) -> None:
+        host_tools.configure_automation(self.home, now=self.now)
+        subscription = self.repository.get_subscription(self.athlete_id, "garmin-cn")
+        assert subscription is not None
+        run = self.repository.start_sync_run(
+            subscription,
+            now=self.now,
+            reason="manual",
+        )
+        self.repository.fail_sync_run(
+            run.run_id,
+            error="SecretAccessKey: automatic sync failed",
+            completed_at=self.now,
+        )
+
+        status = host_tools.automation_status(self.home, now=self.now)
+        encoded = json.dumps(status)
+
+        self.assertEqual(status["policies"][0]["last_run"]["error_class"], "UnknownError")
+        self.assertNotIn("SecretAccessKey", encoded)
+
     @patch(
         "athlete_growth.interfaces.host.tools.default_notification_sink",
         return_value=NoopNotificationSink(),
@@ -184,6 +215,75 @@ class AutomationHostAndCLITests(unittest.TestCase):
         latest = self.repository.latest_sync_run(self.athlete_id, "garmin-cn")
         assert latest is not None
         self.assertEqual(latest.status, "completed")
+        self.assertEqual(latest.reason, "force")
+
+    @patch(
+        "athlete_growth.interfaces.host.tools.default_notification_sink",
+        return_value=NoopNotificationSink(),
+    )
+    @patch(
+        "athlete_growth.interfaces.host.tools.GarminCnConnector",
+        EmptyGarminConnector,
+    )
+    def test_force_is_distinct_from_completed_schedule_in_same_minute(self, _sink) -> None:
+        slot = self.now.replace(second=0, microsecond=0)
+        host_tools.configure_automation(self.home, next_run_at=slot)
+
+        scheduled = host_tools.run_automation_once(self.home, clock=lambda: self.now)
+        forced = host_tools.run_automation_once(
+            self.home,
+            force=True,
+            clock=lambda: self.now,
+        )
+
+        self.assertEqual(scheduled["completed"], 1)
+        self.assertEqual(forced["completed"], 1)
+        with sqlite3.connect(self.layout.database_file) as connection:
+            rows = connection.execute(
+                """
+                SELECT reason, request_key FROM automation_sync_runs
+                WHERE athlete_id = ? AND source = 'garmin-cn'
+                ORDER BY reason
+                """,
+                (self.athlete_id,),
+            ).fetchall()
+        self.assertEqual([row[0] for row in rows], ["force", "schedule"])
+        self.assertEqual(len({row[1] for row in rows}), 2)
+
+    @patch(
+        "athlete_growth.interfaces.host.tools.default_notification_sink",
+        return_value=NoopNotificationSink(),
+    )
+    def test_force_is_distinct_from_failed_schedule_in_same_minute(self, _sink) -> None:
+        slot = self.now.replace(second=0, microsecond=0)
+        host_tools.configure_automation(self.home, next_run_at=slot)
+        with patch(
+            "athlete_growth.interfaces.host.tools.GarminCnConnector",
+            FailingGarminConnector,
+        ):
+            scheduled = host_tools.run_automation_once(self.home, clock=lambda: self.now)
+        with patch(
+            "athlete_growth.interfaces.host.tools.GarminCnConnector",
+            EmptyGarminConnector,
+        ):
+            forced = host_tools.run_automation_once(
+                self.home,
+                force=True,
+                clock=lambda: self.now,
+            )
+
+        self.assertEqual(scheduled["failed"], 1)
+        self.assertEqual(forced["completed"], 1)
+        with sqlite3.connect(self.layout.database_file) as connection:
+            rows = connection.execute(
+                """
+                SELECT reason, status FROM automation_sync_runs
+                WHERE athlete_id = ? AND source = 'garmin-cn'
+                ORDER BY reason
+                """,
+                (self.athlete_id,),
+            ).fetchall()
+        self.assertEqual(rows, [("force", "completed"), ("schedule", "failed")])
 
     @patch(
         "athlete_growth.interfaces.host.tools.default_notification_sink",
@@ -215,6 +315,7 @@ class AutomationHostAndCLITests(unittest.TestCase):
     def test_overlapping_force_runs_do_not_duplicate_work(self, _sink) -> None:
         BlockingGarminConnector.started.clear()
         BlockingGarminConnector.release.clear()
+        BlockingGarminConnector.calls = 0
         host_tools.configure_automation(
             self.home,
             next_run_at=datetime(2026, 10, 27, tzinfo=UTC),
@@ -238,6 +339,7 @@ class AutomationHostAndCLITests(unittest.TestCase):
 
         self.assertEqual(sorted((first["claimed"], second["claimed"])), [0, 1])
         self.assertEqual(first["completed"] + second["completed"], 1)
+        self.assertEqual(BlockingGarminConnector.calls, 1)
 
     def test_notification_list_and_read_enforce_current_athlete_ownership(self) -> None:
         own_id = self._insert_notification("own", self.athlete_id)
@@ -342,6 +444,53 @@ class AutomationHostAndCLITests(unittest.TestCase):
         ):
             self.assertTrue(callable(getattr(host_tools, name, None)), name)
 
+    def test_non_darwin_scheduler_host_calls_do_not_touch_profile_database(self) -> None:
+        for function_name in (
+            "automation_install_macos",
+            "automation_uninstall_macos",
+        ):
+            with self.subTest(function_name=function_name):
+                home = self._initialize_profile_without_automation(function_name)
+                athlete_id = ProfileRegistry(home / "config.toml").default_profile_id()
+                assert athlete_id is not None
+                database_file = VaultLayout(home, athlete_id).database_file
+                before_bytes = database_file.read_bytes()
+                before_tables = self._table_names(database_file)
+                fake_user_home = home.parent / f"{function_name}-user-home"
+
+                with (
+                    patch("athlete_growth.adapters.scheduler.macos.sys.platform", "linux"),
+                    patch(
+                        "athlete_growth.adapters.scheduler.macos.Path.home",
+                        return_value=fake_user_home,
+                    ),
+                    self.assertRaisesRegex(RuntimeError, "macOS"),
+                ):
+                    getattr(host_tools, function_name)(home)
+
+                self.assertEqual(database_file.read_bytes(), before_bytes)
+                self.assertEqual(self._table_names(database_file), before_tables)
+                self.assertFalse(fake_user_home.exists())
+
+    @patch("athlete_growth.adapters.scheduler.macos.sys.platform", "darwin")
+    @patch("athlete_growth.adapters.scheduler.macos.subprocess.run")
+    def test_uninstall_accepts_missing_data_home_and_profile(self, run) -> None:
+        missing_home = Path(self.temporary_directory.name) / "never-initialized"
+        fake_user_home = Path(self.temporary_directory.name) / "fake-user"
+        with patch(
+            "athlete_growth.adapters.scheduler.macos.Path.home",
+            return_value=fake_user_home,
+        ):
+            result = host_tools.automation_uninstall_macos(missing_home)
+
+        self.assertEqual(
+            result,
+            {"installed": False, "label": "com.athlete-growth.automation"},
+        )
+        self.assertFalse(missing_home.exists())
+        self.assertFalse(fake_user_home.exists())
+        run.assert_called_once()
+
     def _insert_notification(self, suffix: str, athlete_id: str) -> str:
         run_id = f"run-{suffix}"
         change_set_id = f"change-{suffix}"
@@ -395,6 +544,31 @@ class AutomationHostAndCLITests(unittest.TestCase):
                 (notification_id, snapshot_id, athlete_id, now, now),
             )
         return notification_id
+
+    def _initialize_profile_without_automation(self, suffix: str) -> Path:
+        home = Path(self.temporary_directory.name) / suffix / "data-home"
+        with redirect_stdout(StringIO()):
+            code = cli_main.main(
+                [
+                    "init",
+                    "--name",
+                    suffix,
+                    "--timezone",
+                    "Asia/Shanghai",
+                    "--data-home",
+                    str(home),
+                ]
+            )
+        self.assertEqual(code, 0)
+        return home
+
+    @staticmethod
+    def _table_names(database_file: Path) -> tuple[str, ...]:
+        with sqlite3.connect(database_file) as connection:
+            rows = connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name"
+            ).fetchall()
+        return tuple(row[0] for row in rows)
 
 
 if __name__ == "__main__":

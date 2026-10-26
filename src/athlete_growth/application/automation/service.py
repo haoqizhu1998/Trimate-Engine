@@ -100,17 +100,24 @@ class AutomaticTrainingLoop:
         *,
         limit: int = 100,
         delivery_limit: int = 100,
+        claim_reason: str = "schedule",
     ) -> AutomationSummary:
         """Run one bounded pass; errors are persisted per run and do not stop peers."""
 
         self._positive_limit(limit, "limit")
         self._positive_limit(delivery_limit, "delivery_limit")
+        if not claim_reason.strip():
+            raise ValueError("claim_reason must not be blank")
         claimed_count = recovered_count = 0
         completed = changed = no_changes = failed = snapshots = notifications = 0
         skipped_recoveries: set[str] = set()
         processed_subscriptions: set[tuple[str, str]] = set()
         for _ in range(limit):
-            claimed = self._claim_next(skipped_recoveries, processed_subscriptions)
+            claimed = self._claim_next(
+                skipped_recoveries,
+                processed_subscriptions,
+                claim_reason=claim_reason,
+            )
             if claimed is None:
                 break
             subscription, run, recovered = claimed
@@ -147,6 +154,8 @@ class AutomaticTrainingLoop:
         self,
         skipped_recoveries: set[str],
         processed_subscriptions: set[tuple[str, str]],
+        *,
+        claim_reason: str,
     ) -> tuple[SyncSubscription, SyncRun, bool] | None:
         """Acquire at most one run using a fresh clock reading."""
 
@@ -176,6 +185,7 @@ class AutomaticTrainingLoop:
 
         claims = self.automation_repository.claim_due(
             self._now(),
+            reason=claim_reason,
             owner=self.owner,
             lease_duration=self.lease_duration,
             limit=1,
