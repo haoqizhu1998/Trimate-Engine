@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import getpass
-import os
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -79,16 +78,21 @@ def execute(args) -> dict[str, object]:
             raw_dir=runtime.layout.raw,
         ).sync(connector, SyncWindow(args.start, args.end))
         return {"source": "garmin-cn", **asdict(result)}
-    if args.command == "garmin-cn-configure":
-        key = getpass.getpass("Garmin China Personal API Key (hidden): ").strip()
-        if not key:
-            raise ValueError("API key must not be empty")
+    if args.command == "garmin-cn-login":
+        email = (args.email or input("Garmin China email: ")).strip()
+        if not email:
+            raise ValueError("Garmin China email must not be empty")
+        password = getpass.getpass("Garmin China password (hidden): ")
+        if not password:
+            raise ValueError("Garmin China password must not be empty")
         connector = GarminCnConnector(home=home)
-        connector.api_key_file.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        descriptor = os.open(connector.api_key_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            handle.write(key + "\n")
-        return {"configured": True, "region": "cn"}
+        identity = connector.authenticate(
+            email=email,
+            password=password,
+            prompt_mfa=lambda: getpass.getpass("Garmin China MFA code (hidden): ").strip(),
+        )
+        password = ""
+        return {"authenticated": True, **identity}
     if args.command == "garmin-cn-revoke":
         GarminCnConnector(home=home).revoke()
         return {"revoked": True, "region": "cn"}

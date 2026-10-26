@@ -116,8 +116,9 @@ flowchart LR
 
 ### 4.8 Ecosystem Connectors
 
-- Garmin 中国区只读连接器；
+- Garmin 中国区本地会话只读连接器，使用独立 Token 目录；
 - Garmin 国际区 Personal API 连接器；
+- 本地 stdio MCP 可作为 AI 工具桥接，但不是数据采集必需运行时；
 - Garmin FIT/TCX/CSV 和账户导出导入器；
 - 赛事目录、路线、天气和成绩来源；
 - 后续可增加 Apple Health、COROS、Suunto、Strava 等连接器。
@@ -250,7 +251,7 @@ domain 不依赖 Garmin、AI SDK、数据库或 Web 框架
 └── logs/
 ```
 
-配置优先级：命令行参数 → 环境变量 → 用户配置文件 → 产品默认值。密钥和 Token 不允许写入普通配置、日志、错误报告或测试 Fixture。
+配置优先级：命令行参数 → 环境变量 → 用户配置文件 → 产品默认值。密钥和 Token 不允许写入普通配置、日志、错误报告或测试 Fixture。Garmin 密码只用于当次交互式登录，不持久化；中国区会话 Token 保存在 `tokens/garmin-cn-session/`，与国际区分离。
 
 ## 8. 接口契约
 

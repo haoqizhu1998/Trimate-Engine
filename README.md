@@ -8,7 +8,7 @@
 
 - 每位运动员使用独立 `athlete_id`、SQLite 数据库、原始证据目录和备份目录；
 - 标准记录携带来源、原始数据哈希、质量标记、算法版本和不可变更正链；
-- Garmin 中国区 Personal API 只读连接器，密钥/Token 与国际区隔离，可撤回；
+- Garmin 中国区本地会话只读连接器，不依赖 Personal API Key，Token 与国际区隔离且可撤回；
 - CSV、JSON、TCX、FIT 文件导入兜底，增量游标、幂等去重、失败重试和数据质量报告；
 - 疲劳、酸痛、疼痛、情绪、意愿、疾病、RPE 与生活情境 Check-in；
 - 训练负荷、强度、连续性、心率漂移，以及 HRV、睡眠、静息心率、身体电量和体重基线；
@@ -63,15 +63,15 @@ athlete-growth restore profile.zip --target-home /path/to/new-private-home
 
 ## Garmin 中国区
 
-配置命令通过不可回显输入读取密钥，不要把密钥直接作为 Shell 命令输入，也不要粘贴到聊天或 Git：
+中国区主路径使用本地 Garmin Connect 网页会话，不需要 Personal API Key。密码和 MFA 验证码只在本机交互式输入，产品只保存权限受限的会话 Token；不要把密码或 Token 粘贴到聊天或 Git：
 
 ```bash
-athlete-growth garmin-cn-configure
+athlete-growth garmin-cn-login --email "your-cn-account@example.com"
 athlete-growth sync --start 2026-10-01 --end 2026-10-26
 athlete-growth garmin-cn-revoke
 ```
 
-连接器使用 Garmin 官方 Personal API Python 客户端并将基础地址切换到中国区。外部服务可用性、账户授权和接口变化无法由本地测试保证；服务不可用时继续使用 FIT/TCX/CSV/JSON 导入，已有数据不会被覆盖。历史迁移审计文件保留在 `data/garmin-import/`，产品运行不会自动读取或修改它们。
+连接器使用开源 `python-garminconnect` 的中国区登录能力，不把 MCP 运行时变成产品必需依赖。这是非官方 Garmin Connect 接口，可能因服务变更或账户限制失效；故障时继续使用 FIT/TCX/CSV/JSON 导入，已有数据不会被覆盖。只允许本地 stdio MCP 作为可选 AI 桥接，不建议将健康账户凭据交给托管 MCP。详见 [Garmin 中国区认证决策](docs/adr/0006-garmin-cn-session-and-optional-mcp.md)。
 
 ## 验证
 

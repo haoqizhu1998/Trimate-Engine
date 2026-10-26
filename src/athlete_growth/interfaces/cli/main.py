@@ -69,10 +69,11 @@ def _build_parser() -> argparse.ArgumentParser:
     sync_parser.add_argument("--end", type=date.fromisoformat, required=True)
     add_home(sync_parser)
 
-    configure_parser = subcommands.add_parser(
-        "garmin-cn-configure", help="store Garmin China Personal API key securely"
+    login_parser = subcommands.add_parser(
+        "garmin-cn-login", help="authenticate to Garmin Connect China and cache a session"
     )
-    add_home(configure_parser)
+    login_parser.add_argument("--email", help="Garmin China account email")
+    add_home(login_parser)
     revoke_parser = subcommands.add_parser(
         "garmin-cn-revoke", help="remove Garmin China credentials"
     )

@@ -12,7 +12,7 @@ license = { text = "Proprietary" }
 authors = [{ name = "Mucci" }]
 dependencies = [
   "fitdecode>=0.11,<1",
-  "garmin-connect-personal-api-python>=1.0,<2",
+  "garminconnect>=0.3.15,<0.4",
 ]
 
 [project.optional-dependencies]

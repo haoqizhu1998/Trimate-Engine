@@ -1,12 +1,14 @@
-"""Read-only Garmin China Personal API connector."""
+"""Read-only Garmin Connect China session connector."""
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from contextlib import suppress
-from datetime import date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta, timezone
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, cast
 
+from athlete_growth.domain.records import JsonValue
 from athlete_growth.ports.data_source import (
     HealthStatus,
     RawSourceRecord,
@@ -15,22 +17,62 @@ from athlete_growth.ports.data_source import (
     SyncWindow,
 )
 
-CN_PERSONAL_API_BASE_URL = "https://personal.connectapi.garmin.cn"
+CN_TIMEZONE = timezone(timedelta(hours=8))
 
 
 class GarminGateway(Protocol):
+    def authenticate(
+        self, email: str, password: str, prompt_mfa: Callable[[], str]
+    ) -> dict[str, object]: ...
+
     def fetch(self, start: date, end: date) -> list[dict[str, object]]: ...
 
     def healthcheck(self) -> bool: ...
 
 
+class GarminSessionClient(Protocol):
+    display_name: str | None
+
+    def login(self, tokenstore: str) -> tuple[object, object]: ...
+
+    def get_userprofile_settings(self) -> dict[str, object]: ...
+
+    def get_activities_by_date(
+        self, startdate: str, enddate: str
+    ) -> list[dict[str, object]]: ...
+
+    def get_user_summary(self, cdate: str) -> dict[str, object]: ...
+
+    def get_steps_data(self, cdate: str) -> list[dict[str, object]]: ...
+
+    def get_sleep_data(self, cdate: str) -> dict[str, object]: ...
+
+    def get_hrv_data(self, cdate: str) -> dict[str, object] | None: ...
+
+    def get_heart_rates(self, cdate: str) -> dict[str, object]: ...
+
+    def get_stress_data(self, cdate: str) -> dict[str, object]: ...
+
+    def get_body_battery(
+        self, startdate: str, enddate: str
+    ) -> list[dict[str, object]]: ...
+
+    def get_weigh_ins(self, startdate: str, enddate: str) -> dict[str, object]: ...
+
+
+GarminClientFactory = Callable[..., GarminSessionClient]
+
+
 class GarminCnConnector:
+    """Primary China-region connector backed by a local Garmin web session."""
+
     region = "cn"
+    auth_method = "session"
 
     def __init__(self, *, home: Path, gateway: GarminGateway | None = None) -> None:
         self.home = home
-        self.api_key_file = home / "secrets" / "garmin-cn-personal-api-key"
-        self.token_cache_file = home / "tokens" / "garmin-cn-bearer-token.json"
+        self.session_token_dir = home / "tokens" / "garmin-cn-session"
+        self.session_token_file = self.session_token_dir / "garmin_tokens.json"
         self._gateway = gateway
 
     def capabilities(self) -> SourceCapabilities:
@@ -52,16 +94,22 @@ class GarminCnConnector:
             supports_write=False,
         )
 
+    def authenticate(
+        self, *, email: str, password: str, prompt_mfa: Callable[[], str]
+    ) -> dict[str, object]:
+        gateway = self._gateway or GarminCnSessionGateway(token_dir=self.session_token_dir)
+        return gateway.authenticate(email, password, prompt_mfa)
+
     def sync(self, window: SyncWindow, cursor: str | None) -> SyncBatch:
-        gateway = self._gateway or _OfficialGarminGateway(self.api_key_file, self.token_cache_file)
+        gateway = self._gateway or GarminCnSessionGateway(token_dir=self.session_token_dir)
         rows = gateway.fetch(window.start, window.end)
         records = tuple(self._to_raw(row) for row in rows)
         return SyncBatch(records, next_cursor=window.end.isoformat())
 
     def healthcheck(self) -> HealthStatus:
         try:
-            gateway = self._gateway or _OfficialGarminGateway(
-                self.api_key_file, self.token_cache_file
+            gateway = self._gateway or GarminCnSessionGateway(
+                token_dir=self.session_token_dir
             )
             ok = gateway.healthcheck()
             return HealthStatus(ok, "connected" if ok else "service unavailable")
@@ -69,9 +117,10 @@ class GarminCnConnector:
             return HealthStatus(False, f"{type(exc).__name__}: {exc}")
 
     def revoke(self) -> None:
-        for path in (self.api_key_file, self.token_cache_file):
-            with suppress(FileNotFoundError):
-                path.unlink()
+        with suppress(FileNotFoundError):
+            self.session_token_file.unlink()
+        with suppress(FileNotFoundError, OSError):
+            self.session_token_dir.rmdir()
 
     @staticmethod
     def _to_raw(row: dict[str, object]) -> RawSourceRecord:
@@ -84,122 +133,148 @@ class GarminCnConnector:
             kind=str(row["kind"]),
             source_id=str(row["source_id"]),
             occurred_at=occurred,
-            payload=payload,
+            payload=cast(dict[str, JsonValue], payload),
         )
 
 
-class _OfficialGarminGateway:
-    """Thin composition around Garmin's official Personal API client."""
+class GarminCnSessionGateway:
+    """Thin read-only composition around the open-source ``garminconnect`` client."""
 
-    def __init__(self, api_key_file: Path, token_cache_file: Path) -> None:
-        self.api_key_file = api_key_file
-        self.token_cache_file = token_cache_file
+    def __init__(
+        self,
+        *,
+        token_dir: Path,
+        client_factory: GarminClientFactory | None = None,
+    ) -> None:
+        self.token_dir = token_dir
+        self._client_factory = client_factory
 
-    def _client(self):
-        from garmin_personal_api import (
-            GarminPersonalApiClient,
-            PersonalApiAuthenticator,
-            resolve_api_key,
+    def authenticate(
+        self, email: str, password: str, prompt_mfa: Callable[[], str]
+    ) -> dict[str, object]:
+        self.token_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.token_dir.chmod(0o700)
+        client = self._factory()(
+            email=email,
+            password=password,
+            is_cn=True,
+            prompt_mfa=prompt_mfa,
         )
-
-        key = resolve_api_key(key_file=self.api_key_file)
-        authenticator = PersonalApiAuthenticator(bearer_token_cache_file=self.token_cache_file)
-        authenticator.base_url = CN_PERSONAL_API_BASE_URL
-        try:
-            token = authenticator.obtain_token(key)
-        finally:
-            authenticator.close()
-        client = GarminPersonalApiClient(token.access_token)
-        client.base_url = CN_PERSONAL_API_BASE_URL
-        return client
+        client.login(str(self.token_dir))
+        return {"display_name": client.display_name, "region": "cn"}
 
     def fetch(self, start: date, end: date) -> list[dict[str, object]]:
-        client = self._client()
-        try:
-            datasets = {
-                "daily-summary": client.get_daily_summaries(start, end),
-                "sleep": client.get_daily_sleep_summaries(start, end),
-                "stress": client.get_daily_stress(start, end),
-                "steps": client.get_daily_steps(start, end),
-                "body-battery": client.get_daily_body_battery(start, end),
-                "body-weight": client.get_weight_measurements(start, end),
-                "hrv": client.get_daily_hrv_summaries(start, end),
-                "activity": client.search_activities(
-                    start=0, limit=1000, start_date=start, end_date=end
-                ),
-            }
-            current = start
-            heart_rate_rows: list[object] = []
-            while current <= end:
-                heart_rate_rows.append(client.get_daily_heart_rate(current))
-                current = date.fromordinal(current.toordinal() + 1)
-            datasets["heart-rate"] = heart_rate_rows
-        finally:
-            client.close()
+        client = self._cached_client()
         rows: list[dict[str, object]] = []
-        for kind, document in datasets.items():
-            rows.extend(self._rows(kind, document, start))
+        start_text = start.isoformat()
+        end_text = end.isoformat()
+
+        for index, activity in enumerate(
+            client.get_activities_by_date(start_text, end_text)
+        ):
+            rows.append(self._row("activity", activity, start, index))
+
+        current = start
+        while current <= end:
+            current_text = current.isoformat()
+            daily_calls: tuple[tuple[str, Callable[[str], object]], ...] = (
+                ("daily-summary", client.get_user_summary),
+                ("steps", client.get_steps_data),
+                ("sleep", client.get_sleep_data),
+                ("hrv", client.get_hrv_data),
+                ("heart-rate", client.get_heart_rates),
+                ("stress", client.get_stress_data),
+            )
+            for kind, fetch_daily in daily_calls:
+                document = fetch_daily(current_text)
+                rows.extend(self._document_rows(kind, document, current))
+            current = date.fromordinal(current.toordinal() + 1)
+
+        rows.extend(
+            self._document_rows(
+                "body-battery", client.get_body_battery(start_text, end_text), start
+            )
+        )
+        rows.extend(
+            self._document_rows(
+                "body-weight", client.get_weigh_ins(start_text, end_text), start
+            )
+        )
         return rows
 
     def healthcheck(self) -> bool:
-        client = self._client()
-        try:
-            return client.get_user_profile_settings() is not None
-        finally:
-            client.close()
+        return self._cached_client().get_userprofile_settings() is not None
 
-    @staticmethod
-    def _rows(kind: str, document: object, fallback_date: date) -> list[dict[str, object]]:
+    def _cached_client(self) -> GarminSessionClient:
+        client = self._factory()(is_cn=True)
+        client.login(str(self.token_dir))
+        return client
+
+    def _factory(self) -> GarminClientFactory:
+        if self._client_factory is not None:
+            return self._client_factory
+        from garminconnect import Garmin
+
+        return cast(GarminClientFactory, Garmin)
+
+    @classmethod
+    def _document_rows(
+        cls, kind: str, document: object, fallback_date: date
+    ) -> list[dict[str, object]]:
         if document is None:
             return []
+        if isinstance(document, list):
+            return [
+                cls._row(kind, item, fallback_date, index)
+                for index, item in enumerate(document)
+                if isinstance(item, dict)
+            ]
         if isinstance(document, dict):
-            candidates = next(
-                (value for value in document.values() if isinstance(value, list)),
-                [document],
-            )
-        elif isinstance(document, list):
-            candidates = document
-        else:
-            return []
-        rows: list[dict[str, object]] = []
-        for index, item in enumerate(candidates):
-            if not isinstance(item, dict):
-                continue
-            source_id = next(
-                (
-                    item[key]
-                    for key in ("activityId", "calendarDate", "summaryId", "id")
-                    if item.get(key) is not None
-                ),
-                f"{fallback_date.isoformat()}:{kind}:{index}",
-            )
-            date_value = next(
-                (
-                    item[key]
-                    for key in ("startTimeGMT", "startTimeLocal", "calendarDate", "date")
-                    if item.get(key) is not None
-                ),
-                fallback_date.isoformat(),
-            )
-            if isinstance(date_value, (int, float)):
-                local_tz = datetime.now().astimezone().tzinfo
-                occurred = datetime.fromtimestamp(date_value / 1000, tz=local_tz)
-            else:
-                text = str(date_value)
-                if "T" not in text:
-                    occurred = datetime.combine(
-                        date.fromisoformat(text[:10]), time.min
-                    ).astimezone()
-                else:
-                    occurred = datetime.fromisoformat(text.replace("Z", "+00:00"))
-                    if occurred.tzinfo is None:
-                        occurred = occurred.astimezone()
-            rows.append(
-                {
-                    "kind": kind,
-                    "source_id": str(source_id),
-                    "occurred_at": occurred.isoformat(),
-                    "payload": item,
-                }
-            )
-        return rows
+            return [cls._row(kind, document, fallback_date, 0)]
+        return []
+
+    @staticmethod
+    def _row(
+        kind: str, item: dict[str, object], fallback_date: date, index: int
+    ) -> dict[str, object]:
+        source_id = next(
+            (
+                item[key]
+                for key in ("activityId", "calendarDate", "date", "summaryId", "id")
+                if item.get(key) is not None
+            ),
+            f"{fallback_date.isoformat()}:{kind}:{index}",
+        )
+        date_key, date_value = next(
+            (
+                (key, item[key])
+                for key in (
+                    "startTimeGMT",
+                    "startTimeLocal",
+                    "calendarDate",
+                    "date",
+                    "startDate",
+                )
+                if item.get(key) is not None
+            ),
+            ("calendarDate", fallback_date.isoformat()),
+        )
+        occurred = _parse_garmin_datetime(date_key, date_value)
+        return {
+            "kind": kind,
+            "source_id": str(source_id),
+            "occurred_at": occurred.isoformat(),
+            "payload": item,
+        }
+
+
+def _parse_garmin_datetime(field: str, value: object) -> datetime:
+    if isinstance(value, (int, float)):
+        return datetime.fromtimestamp(value / 1000, tz=UTC)
+    text = str(value).strip().replace(" ", "T").replace("Z", "+00:00")
+    if "T" not in text:
+        return datetime.combine(date.fromisoformat(text[:10]), time.min, tzinfo=CN_TIMEZONE)
+    occurred = datetime.fromisoformat(text)
+    if occurred.tzinfo is None:
+        return occurred.replace(tzinfo=UTC if field.endswith("GMT") else CN_TIMEZONE)
+    return occurred
