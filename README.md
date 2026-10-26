@@ -1,8 +1,22 @@
 # 个人运动训练分析与成长工具
 
-这是一个本地优先、证据可追溯的个人训练工具。阶段 0–5 的代码能力已经形成完整纵向闭环：个人档案与数据权利、Garmin 中国区及文件采集、确定性分析和安全规则、目标与训练计划、多模型 AI 路由、恢复/营养/赛事策略。阶段 6 的 Web/App、托管服务、商业发行和正式开源工作没有开发。
+这是一个本地优先、证据可追溯、以模型宿主为主要交互入口的个人训练工具。目标形态是在 ChatGPT/Codex、WorkBuddy、Coze 等熟悉的 AI 软件中完成安装、同步、分析、计划和反馈，训练核心与任一宿主保持解耦。
+
+阶段 0–5 的本地代码能力已经形成完整纵向闭环：个人档案与数据权利、Garmin 中国区及文件采集、确定性分析和安全规则、目标与训练计划、多模型 AI 路由、恢复/营养/赛事策略。当前可用入口仍是 CLI；阶段 5.5 的模型宿主安装、对话式新手引导、MCP/OpenAPI 适配尚未开发，不能把设计状态误认为已经可以在 GPT、WorkBuddy 或 Coze 中直接安装使用。阶段 6 的独立 Web/App、托管服务、商业发行和正式开源工作也没有开发。
 
 产品只提供训练与一般健康指导，不提供疾病诊断、治疗或处方。疼痛、疾病、肿胀或日常功能受限会优先触发确定性安全规则和专业帮助建议，AI 不能绕过这些规则。
+
+## 目标交互形态
+
+- **ChatGPT/Codex**：通过 MCP/Plugin 接入；不具备完整 MCP 能力时可使用 HTTP/OpenAPI Action；
+- **WorkBuddy**：通过 MCP 插件接入，Skill 与 Workflow 只负责对话和流程编排；
+- **Coze**：通过自定义 Plugin/OpenAPI 接入，并用 Workflow 承载首次引导与固定闭环；
+- **产品核心**：统一 Tool Catalog、身份授权、引导状态、训练算法和个人数据均保存在引擎侧；
+- **CLI**：保留为开发、诊断、恢复和无宿主时的降级入口。
+
+用户更换宿主或模型时不需要迁移数据。每个宿主只拿到当前操作所需的最小化结果，不直接访问 SQLite、Garmin Token 或原始数据目录。
+
+“在哪个 AI 软件里操作”和“由哪个模型解释结果”彼此独立：即使用户从 ChatGPT 进入，也可以选择本地模型或关闭 AI 外发，确定性指标与安全规则仍在产品引擎中执行。
 
 ## 已实现能力
 
@@ -75,7 +89,7 @@ athlete-growth garmin-cn-revoke
 
 同步覆盖活动、每日汇总、步数、睡眠、HRV、心率、压力、身体电量和体重。批次完成后立即落盘；重跑同一时间段时，来源身份和内容都未变的记录只计为重复，不会再写一份。旧格式分时片段会保留为可审计历史，不再进入当前分析视图。
 
-连接器使用开源 `python-garminconnect` 的中国区登录能力，不把 MCP 运行时变成产品必需依赖。这是非官方 Garmin Connect 接口，可能因服务变更或账户限制失效；故障时继续使用 FIT/TCX/CSV/JSON 导入，已有数据不会被覆盖。只允许本地 stdio MCP 作为可选 AI 桥接，不建议将健康账户凭据交给托管 MCP。详见 [Garmin 中国区认证决策](docs/adr/0006-garmin-cn-session-and-optional-mcp.md)。
+连接器使用开源 `python-garminconnect` 的中国区登录能力，不把 MCP 当成 Garmin 数据采集运行时。这是非官方 Garmin Connect 接口，可能因服务变更或账户限制失效；故障时继续使用 FIT/TCX/CSV/JSON 导入，已有数据不会被覆盖。MCP 只作为模型宿主调用产品工具的一种传输方式；Garmin 凭据由引擎保管，不交给模型宿主或托管 Prompt。详见 [Garmin 中国区认证决策](docs/adr/0006-garmin-cn-session-and-optional-mcp.md)。
 
 ## 验证
 
@@ -94,10 +108,12 @@ athlete-growth --help
 - [技术架构](docs/architecture.md)
 - [能力地图](docs/capability-map.md)
 - [产品路线图与状态](docs/roadmap.md)
+- [模型宿主优先的新手引导](docs/host-first-onboarding.md)
 - [产品、研发过程与个人数据分离](docs/adr/0001-separate-product-process-and-personal-data.md)
 - [一般健康、安全与 AI 边界](docs/adr/0002-general-wellness-safety-and-ai-boundaries.md)
 - [版本化标准记录与连接器](docs/adr/0003-versioned-canonical-records-and-connectors.md)
 - [AI 隐私路由与审计](docs/adr/0004-ai-provider-privacy-routing.md)
 - [确定性安全与指导边界](docs/adr/0005-deterministic-safety-and-guidance.md)
+- [宿主优先的对话式产品交付](docs/adr/0007-host-first-conversational-delivery.md)
 
-个人真实数据、密钥、Token、缓存和日志不属于产品源码。内部调研、定价、销售、Sprint 和复盘也不进入本产品仓。许可证、稳定公共 API、UI、托管和商业发行属于阶段 6，本次明确未开发。
+个人真实数据、密钥、Token、缓存和日志不属于产品源码。内部调研、定价、销售、Sprint 和复盘也不进入本产品仓。宿主接入与引导属于阶段 5.5；许可证、独立 Web/App、托管和商业发行属于阶段 6，二者当前均未开发。

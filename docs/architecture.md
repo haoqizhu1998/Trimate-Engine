@@ -2,7 +2,7 @@
 
 ## 1. 架构目标
 
-产品需要同时满足七个目标：
+产品需要同时满足八个目标：
 
 1. **个人可用**：优先服务单个运动者，安装简单、数据本地可控。
 2. **证据可追溯**：每个指标、分析和建议都能追溯到来源数据、算法版本和模型运行。
@@ -11,6 +11,7 @@
 5. **产品可发布**：源码、运行数据和内部研发过程彻底分离，可安全开源或打包商业版本。
 6. **用户可控制**：用户能查看授权、限制 AI 外发、导出、备份、更正和删除自己的数据。
 7. **闭环可学习**：系统同时接收客观数据、主观感受和计划执行反馈，逐步学习个人响应。
+8. **宿主可迁移**：用户在 ChatGPT/Codex、WorkBuddy、Coze 等熟悉的模型宿主中使用产品，换宿主不迁移个人数据，也不改变业务结论。
 
 ## 2. 核心架构决策
 
@@ -23,6 +24,8 @@
 - 日常分析必须结合可选的主观 Check-in，不能把缺失的主观状态推断为“状态良好”。
 - 安全规则先于 AI 建议执行；疼痛、生病或异常风险信号可以限制计划，但不能被产品表述为医学诊断。
 - 数据授权、AI 外发、导出、备份、更正和删除是基础能力，不延后到商业化阶段。
+- 采用**宿主优先、核心宿主无关**的产品形态：统一 Tool Catalog 是用户入口，MCP 和 HTTP/OpenAPI 只是传输适配，CLI 仅作为开发、诊断、恢复与降级入口。
+- 新手引导进度保存在应用层状态机中，不依赖模型记忆、Prompt 或单次对话历史。
 
 ## 3. 系统关系
 
@@ -44,9 +47,16 @@ flowchart LR
     Feedback[执行结果 / 用户纠正] --> Learning[个人响应学习]
     Reports --> Feedback
     Learning --> Analytics
-    Reports --> CLI[CLI]
-    Reports -. 阶段 6 .-> API[未来本地 API]
-    API -. 阶段 6 .-> Web[未来 Web / App]
+    Reports --> Tools[统一 Tool Catalog]
+    Onboarding[应用层引导状态机] --> Tools
+    Tools --> MCP[MCP 适配器]
+    Tools --> HTTP[HTTP / OpenAPI 适配器]
+    Tools --> CLI[维护与降级 CLI]
+    MCP --> GPT[ChatGPT / Codex]
+    MCP --> WB[WorkBuddy]
+    HTTP --> GPT
+    HTTP --> Coze[Coze Agent / Workflow]
+    Tools -. 阶段 6 .-> Web[未来独立 Web / App]
 ```
 
 ## 4. 业务模块
@@ -118,7 +128,7 @@ flowchart LR
 
 - Garmin 中国区本地会话只读连接器，使用独立 Token 目录；
 - Garmin 国际区 Personal API 连接器；
-- 本地 stdio MCP 可作为 AI 工具桥接，但不是数据采集必需运行时；
+- MCP 可作为模型宿主的本地或远程工具传输，但不是 Garmin 数据采集运行时，也不持有 Garmin 凭据；
 - Garmin FIT/TCX/CSV 和账户导出导入器；
 - 赛事目录、路线、天气和成绩来源；
 - 后续可增加 Apple Health、COROS、Suunto、Strava 等连接器。
@@ -136,9 +146,20 @@ flowchart LR
 - 云端模型调用前执行数据最小化和授权检查，本地模型可作为隐私优先选项；
 - 固定评测集持续检查事实一致性、安全边界和模型降级。
 
+### 4.10 Host Integration & Onboarding
+
+- “模型宿主”和“模型 Provider”是两条独立轴线：前者承载用户交互，后者执行经授权的 AI 解释；用户在 ChatGPT 中操作不代表训练数据必须交给 OpenAI 模型；
+- 版本化 `Tool Catalog` 统一暴露同步、分析、目标、计划、反馈和数据权利能力；
+- MCP 适配 ChatGPT/Codex、WorkBuddy 等支持该协议的宿主；HTTP/OpenAPI 适配 GPT Actions、Coze Plugin 和其他宿主；
+- `hosts/chatgpt`、`hosts/workbuddy`、`hosts/coze` 只保存安装清单、工具描述、对话指南、工作流和渲染模板，不复制领域规则；
+- 引导状态由应用层持久化，覆盖建档、数据源选择、同步、基线、目标、Check-in、首周计划和激活；
+- 引擎根据宿主能力协商传输、认证、展示和流式进度，不要求每个宿主实现完全相同的 UI；
+- 本地模式使用一次性配对或本机权限；远程模式使用 OAuth/OIDC，并将外部身份映射到 `athlete_id`；
+- 删除、导出、计划写回等敏感动作必须由引擎签发和校验短时效确认令牌，不能只依赖宿主文本确认。
+
 ## 5. 已实现源码结构
 
-产品仓使用包名 `athlete_growth`。阶段 0–5 的实际结构如下；API、Web/App 和发布系统属于阶段 6，尚未创建：
+产品仓使用包名 `athlete_growth`。阶段 0–5 的实际结构如下；阶段 5.5 的宿主适配、独立 Web/App 和发布系统尚未创建：
 
 ```text
 athlete-growth/
@@ -188,11 +209,26 @@ athlete-growth/
     └── adr/
 ```
 
+阶段 5.5 计划新增以下边界；它们是目标结构，不代表当前已经实现：
+
+```text
+src/athlete_growth/
+├── application/onboarding/   # 可恢复的引导状态机
+├── interfaces/tools/         # 统一 Tool Catalog 与结果契约
+├── interfaces/mcp/           # MCP 传输适配
+└── interfaces/http/          # HTTP/OpenAPI 传输适配
+hosts/
+├── chatgpt/                  # MCP/Plugin 与 GPT Action 描述
+├── workbuddy/                # MCP 插件、Skill 与 Workflow
+└── coze/                     # Plugin/OpenAPI 与 Workflow
+```
+
 ### 依赖方向
 
 ```text
 interfaces → application → domain
 adapters   → ports       ← application
+host packs → MCP/HTTP adapters → tool facade → application
 domain 不依赖 Garmin、AI SDK、数据库或 Web 框架
 ```
 
@@ -278,6 +314,14 @@ domain 不依赖 Garmin、AI SDK、数据库或 Web 框架
 - `backup()`、`restore()`：验证后备份和恢复；
 - `correct_record()`：追加更正而不篡改原始记录；
 - `delete_profile()`：预览影响、二次确认并生成删除证明。
+
+### HostToolFacade
+
+- `catalog()`：返回工具版本、参数 Schema、风险等级与宿主所需能力；
+- `invoke(tool, input, context)`：验证身份、授权、幂等键和确认令牌后调用应用用例；
+- `onboarding_state()`：返回当前引导状态、完成项、缺口和唯一推荐下一步；
+- `capabilities()`：协商流式进度、OAuth、卡片展示和本地文件访问等宿主能力；
+- 所有面向用户的结果统一包含 `summary`、`facts`、`evidence_ids`、`confidence`、`data_gaps`、`risk`、`next_actions`、`requires_confirmation` 和 `disclosure`。
 
 ## 9. 安全与产品化边界
 
