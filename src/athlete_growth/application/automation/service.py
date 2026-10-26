@@ -512,7 +512,7 @@ class AutomaticTrainingLoop:
         return f"{start_date.isoformat()}/{end_date.isoformat()}"
 
     def _verify_raw_evidence(self, change_set: DataChangeSet) -> None:
-        """Cryptographically verify every raw object in the immutable projection."""
+        """Verify changed raw inputs and any raw objects referenced by the projection."""
 
         if LEGACY_PROJECTION_UNAVAILABLE in change_set.projection_record_ids:
             raise ValueError("legacy analysis projection is unavailable; sync must be restarted")
@@ -524,15 +524,17 @@ class AutomaticTrainingLoop:
         referenced_record_ids = tuple(
             dict.fromkeys(change_set.record_ids + change_set.projection_record_ids)
         )
+        changed_record_ids = set(change_set.record_ids)
         for record_id in referenced_record_ids:
             record = self.record_store.get(record_id)
-            if record is None or record.athlete_id != change_set.athlete_id or not record.evidence:
+            if record is None or record.athlete_id != change_set.athlete_id:
                 raise ValueError("raw evidence could not be verified")
+            verified_raw_objects = 0
             for evidence in record.evidence:
+                if evidence.raw_hash is None:
+                    continue
                 try:
                     require_safe_component(evidence.source, "evidence source")
-                    if evidence.raw_hash is None:
-                        raise ValueError("raw evidence hash is unavailable")
                     raw_file = (
                         athlete_raw_root
                         / evidence.source
@@ -549,6 +551,9 @@ class AutomaticTrainingLoop:
                     raise ValueError("raw evidence could not be verified") from None
                 if actual_hash != evidence.raw_hash:
                     raise ValueError("raw evidence could not be verified")
+                verified_raw_objects += 1
+            if record_id in changed_record_ids and verified_raw_objects == 0:
+                raise ValueError("raw evidence could not be verified")
 
     @staticmethod
     def _sha256_raw_file(raw_root: Path, source: str, expected_hash: str) -> str:

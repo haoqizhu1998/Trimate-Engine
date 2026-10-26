@@ -24,6 +24,7 @@ from athlete_growth.application.automation import (
     NotificationMode,
     SyncSubscription,
 )
+from athlete_growth.application.check_in.service import CheckInService
 from athlete_growth.application.ingest.service import IngestionService
 from athlete_growth.application.report.service import ReportService
 from athlete_growth.domain.athlete import AthleteProfile
@@ -354,6 +355,51 @@ class AutomaticTrainingLoopTests(unittest.TestCase):
         self.assertEqual((daily.period, daily.risk_level), ("2026-10-26", "high"))
         self.assertEqual(notification.priority, "actionable")
         self.assertIsNone(notification.deliver_after)
+        self.assertEqual(len(sink.delivered), 1)
+
+    def test_activity_sync_allows_evidence_free_manual_check_in_in_projection(self) -> None:
+        self.add_profile()
+        self.add_subscription("watch")
+        manual_check_in = CheckInService("athlete-001", self.records).record(
+            occurred_at=datetime(2026, 10, 26, 8, 0, tzinfo=UTC),
+            fatigue=2,
+            soreness=1,
+            pain=8,
+            mood=7,
+            motivation=6,
+            illness=False,
+        )
+        self.assertEqual(manual_check_in.evidence, ())
+        connector = MutableConnector(
+            "watch",
+            (
+                _record(
+                    "watch",
+                    "activity",
+                    "activity-with-manual-context",
+                    occurred_at=datetime(2026, 10, 26, 9, 0, tzinfo=UTC),
+                    activity_type="running",
+                    duration_seconds=1800,
+                    distance_meters=5000,
+                ),
+            ),
+        )
+        sink = RecordingSink()
+
+        result = self.loop({"watch": connector}, sink).run_once(limit=1)
+
+        run = self.automation.latest_sync_run("athlete-001", "watch")
+        assert run is not None
+        change_set = self.automation.get_change_set_for_run(run.run_id)
+        assert change_set is not None
+        snapshots = self.automation.list_snapshots("athlete-001")
+        daily = next(item for item in snapshots if item.analysis_kind == "daily")
+        self.assertEqual((result.completed, result.changed, result.failed), (1, 1, 0))
+        self.assertIn(manual_check_in.record_id, change_set.projection_record_ids)
+        self.assertNotIn(manual_check_in.record_id, change_set.record_ids)
+        self.assertEqual({item.analysis_kind for item in snapshots}, {"daily", "weekly"})
+        self.assertEqual(daily.risk_level, "high")
+        self.assertEqual(len(self.automation.list_unread("athlete-001")), 1)
         self.assertEqual(len(sink.delivered), 1)
 
     def test_connector_failure_is_durable_and_other_due_work_continues(self) -> None:
