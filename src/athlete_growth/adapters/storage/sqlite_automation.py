@@ -1786,7 +1786,7 @@ class SQLiteAutomationRepository:
         lease_owner: str | None = None,
         lease_checked_at: datetime | None = None,
         lease_clock: Callable[[], datetime] | None = None,
-    ) -> UserNotification:
+    ) -> UserNotification | None:
         created = self._datetime(created_at or datetime.now(UTC), "created_at")
         deliver_at = (
             self._datetime(deliver_after, "deliver_after") if deliver_after is not None else None
@@ -1833,10 +1833,14 @@ class SQLiteAutomationRepository:
                 return existing
             relation = connection.execute(
                 """
-                SELECT analysis_snapshots.athlete_id, data_change_sets.run_id
+                SELECT analysis_snapshots.athlete_id, data_change_sets.run_id,
+                       sync_subscriptions.notification_mode AS current_notification_mode
                 FROM analysis_snapshots
                 JOIN data_change_sets
                   ON data_change_sets.change_set_id = analysis_snapshots.change_set_id
+                LEFT JOIN sync_subscriptions
+                  ON sync_subscriptions.athlete_id = data_change_sets.athlete_id
+                 AND sync_subscriptions.source = data_change_sets.source
                 WHERE analysis_snapshots.snapshot_id = ?
                 """,
                 (snapshot.snapshot_id,),
@@ -1855,6 +1859,9 @@ class SQLiteAutomationRepository:
                 lease_checked_at=lease_checked_at,
                 lease_clock=lease_clock,
             )
+            if relation["current_notification_mode"] == NotificationMode.OFF.value:
+                connection.commit()
+                return None
             connection.execute(
                 """
                 INSERT INTO notification_inbox (
@@ -2136,6 +2143,127 @@ class SQLiteAutomationRepository:
             self._validate_delivery_claim(renewed, lease_token, owner, commit_at)
             connection.commit()
             return renewed
+        except BaseException:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def deliver_claimed(
+        self,
+        notification_id: str,
+        deliver: Callable[[UserNotification], None],
+        *,
+        lease_token: str,
+        owner: str,
+        now: datetime,
+        lease_clock: Callable[[], datetime] | None = None,
+    ) -> UserNotification | None:
+        """Fence policy, a bounded non-database callback, and its receipt atomically."""
+
+        fallback_now = self._datetime(now, "now")
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            checked_at = self._lease_time(lease_clock, fallback_now, "now")
+            row = connection.execute(
+                """
+                SELECT notification_inbox.*,
+                       sync_subscriptions.notification_mode AS current_notification_mode
+                FROM notification_inbox
+                JOIN analysis_snapshots
+                  ON analysis_snapshots.snapshot_id = notification_inbox.snapshot_id
+                JOIN data_change_sets
+                  ON data_change_sets.change_set_id = analysis_snapshots.change_set_id
+                LEFT JOIN sync_subscriptions
+                  ON sync_subscriptions.athlete_id = data_change_sets.athlete_id
+                 AND sync_subscriptions.source = data_change_sets.source
+                WHERE notification_inbox.notification_id = ?
+                """,
+                (notification_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(notification_id)
+            notification = self._notification_from_row(row)
+            self._validate_delivery_claim(notification, lease_token, owner, checked_at)
+            if row["current_notification_mode"] == NotificationMode.OFF.value:
+                cursor = connection.execute(
+                    """
+                    UPDATE notification_inbox
+                    SET delivery_lease_token = NULL,
+                        delivery_lease_owner = NULL,
+                        delivery_lease_expires_at = NULL
+                    WHERE notification_id = ? AND delivered_at IS NULL
+                      AND delivery_lease_token = ? AND delivery_lease_owner = ?
+                    """,
+                    (notification_id, lease_token, owner),
+                )
+                if cursor.rowcount != 1:
+                    raise ValueError("notification delivery lease conflict")
+                connection.commit()
+                return None
+
+            try:
+                deliver(notification)
+            except Exception as exc:
+                failed_at = self._lease_time(lease_clock, fallback_now, "now")
+                next_attempt = failed_at + self._delivery_backoff(
+                    notification.delivery_attempts + 1
+                )
+                cursor = connection.execute(
+                    """
+                    UPDATE notification_inbox
+                    SET delivery_attempts = delivery_attempts + 1,
+                        last_error = ?, next_attempt_at = ?,
+                        delivery_lease_token = NULL,
+                        delivery_lease_owner = NULL,
+                        delivery_lease_expires_at = NULL
+                    WHERE notification_id = ? AND delivered_at IS NULL
+                      AND delivery_lease_token = ? AND delivery_lease_owner = ?
+                    """,
+                    (
+                        f"{type(exc).__name__}: delivery failed",
+                        next_attempt.isoformat(),
+                        notification_id,
+                        lease_token,
+                        owner,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise ValueError("notification delivery lease conflict") from exc
+                connection.commit()
+                raise
+
+            delivered_at = self._lease_time(lease_clock, fallback_now, "now")
+            cursor = connection.execute(
+                """
+                UPDATE notification_inbox
+                SET delivered_at = ?, delivery_attempts = delivery_attempts + 1,
+                    last_error = NULL,
+                    delivery_lease_token = NULL,
+                    delivery_lease_owner = NULL,
+                    delivery_lease_expires_at = NULL
+                WHERE notification_id = ? AND delivered_at IS NULL
+                  AND delivery_lease_token = ? AND delivery_lease_owner = ?
+                """,
+                (
+                    delivered_at.isoformat(),
+                    notification_id,
+                    lease_token,
+                    owner,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("notification delivery lease conflict")
+            row = connection.execute(
+                "SELECT * FROM notification_inbox WHERE notification_id = ?",
+                (notification_id,),
+            ).fetchone()
+            assert row is not None
+            delivered = self._notification_from_row(row)
+            connection.commit()
+            return delivered
         except BaseException:
             if connection.in_transaction:
                 connection.rollback()

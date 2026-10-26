@@ -645,6 +645,34 @@ class AutomaticTrainingLoopTests(unittest.TestCase):
             [notification_id],
         )
 
+    def test_policy_flip_after_fetch_suppresses_notification_creation(self) -> None:
+        self.add_profile()
+        self.add_subscription("watch")
+
+        def disable_notifications() -> None:
+            self.set_notification_mode("watch", NotificationMode.OFF)
+
+        connector = MutableConnector(
+            "watch",
+            (
+                _record(
+                    "watch",
+                    "check-in",
+                    "disabled-during-sync",
+                    occurred_at=datetime(2026, 10, 26, 8, 0, tzinfo=UTC),
+                    pain=0,
+                ),
+            ),
+            after_fetch=disable_notifications,
+        )
+
+        summary = self.loop({"watch": connector}).run_once(limit=1)
+
+        self.assertEqual((summary.completed, summary.changed), (1, 1))
+        self.assertEqual(summary.snapshots, 2)
+        self.assertEqual(summary.notifications, 0)
+        self.assertEqual(self.automation.list_unread("athlete-001"), [])
+
     def test_off_policy_releases_a_claim_if_configuration_changes_before_sink(self) -> None:
         notification_id = self.queue_future_digest()
         self.clock.now = datetime(2026, 10, 26, 15, 0, tzinfo=UTC)
@@ -677,12 +705,74 @@ class AutomaticTrainingLoopTests(unittest.TestCase):
 
         notification = repository.get_notification(notification_id)
         assert notification is not None
-        self.assertEqual((summary.attempted, summary.delivered, summary.failed), (1, 0, 1))
+        self.assertEqual((summary.attempted, summary.delivered, summary.failed), (1, 0, 0))
         self.assertEqual(sink.delivered, [])
         self.assertIsNone(notification.delivered_at)
         self.assertIsNone(notification.delivery_lease_token)
         self.assertIsNone(notification.delivery_lease_owner)
         self.assertIsNone(notification.delivery_lease_expires_at)
+
+    def test_configure_off_waits_for_validated_delivery_transaction(self) -> None:
+        notification_id = self.queue_future_digest()
+        self.clock.now = datetime(2026, 10, 26, 15, 0, tzinfo=UTC)
+        sink_started = Event()
+        release_sink = Event()
+
+        class BlockingSink(RecordingSink):
+            def deliver(self, notification) -> None:
+                sink_started.set()
+                if not release_sink.wait(timeout=2):
+                    raise TimeoutError("test sink release timed out")
+                super().deliver(notification)
+
+        sink = BlockingSink()
+        delivery_summaries = []
+        delivery_errors = []
+
+        def deliver() -> None:
+            try:
+                delivery_summaries.append(self.loop({}, sink).deliver_pending(limit=1))
+            except BaseException as exc:
+                delivery_errors.append(exc)
+
+        delivery_thread = Thread(target=deliver)
+        delivery_thread.start()
+        self.assertTrue(sink_started.wait(timeout=1))
+
+        configure_started = Event()
+        configured = Event()
+
+        def configure_off() -> None:
+            configure_started.set()
+            self.set_notification_mode("watch", NotificationMode.OFF)
+            configured.set()
+
+        configure_thread = Thread(target=configure_off)
+        configure_thread.start()
+        self.assertTrue(configure_started.wait(timeout=1))
+        self.assertFalse(configured.wait(timeout=0.1))
+
+        release_sink.set()
+        delivery_thread.join(timeout=2)
+        configure_thread.join(timeout=2)
+
+        self.assertFalse(delivery_thread.is_alive())
+        self.assertFalse(configure_thread.is_alive())
+        self.assertEqual(delivery_errors, [])
+        self.assertTrue(configured.is_set())
+        self.assertEqual(len(delivery_summaries), 1)
+        self.assertEqual(
+            (
+                delivery_summaries[0].attempted,
+                delivery_summaries[0].delivered,
+                delivery_summaries[0].failed,
+            ),
+            (1, 1, 0),
+        )
+        self.assertEqual(
+            [item.notification_id for item in sink.delivered],
+            [notification_id],
+        )
 
     def test_reenabling_policy_makes_a_suppressed_digest_deliverable(self) -> None:
         notification_id = self.queue_future_digest()
@@ -708,11 +798,12 @@ class AutomaticTrainingLoopTests(unittest.TestCase):
 
     def test_notification_without_a_current_subscription_keeps_delivery_behavior(self) -> None:
         notification_id = self.queue_future_digest()
-        with sqlite3.connect(self.database_file) as connection:
+        with closing(sqlite3.connect(self.database_file)) as connection:
             connection.execute(
                 "DELETE FROM sync_subscriptions WHERE athlete_id = ? AND source = ?",
                 ("athlete-001", "watch"),
             )
+            connection.commit()
         self.clock.now = datetime(2026, 10, 26, 15, 0, tzinfo=UTC)
         sink = RecordingSink()
 
@@ -831,8 +922,8 @@ class AutomaticTrainingLoopTests(unittest.TestCase):
         class AdvancingReceiptRepository(SQLiteAutomationRepository):
             advanced = False
 
-            def mark_delivered(self, *args, **kwargs):
-                receipt = super().mark_delivered(*args, **kwargs)
+            def deliver_claimed(self, *args, **kwargs):
+                receipt = super().deliver_claimed(*args, **kwargs)
                 if not self.advanced:
                     self.advanced = True
                     parent_clock.now += timedelta(minutes=6)
@@ -884,9 +975,9 @@ class AutomaticTrainingLoopTests(unittest.TestCase):
         parent_clock = self.clock
 
         class ExpiringRepository(SQLiteAutomationRepository):
-            def renew_delivery_claim(self, *args, **kwargs):
+            def deliver_claimed(self, *args, **kwargs):
                 parent_clock.now += timedelta(minutes=6)
-                return super().renew_delivery_claim(*args, **kwargs)
+                return super().deliver_claimed(*args, **kwargs)
 
         repository = ExpiringRepository(self.database_file)
         sink = RecordingSink()

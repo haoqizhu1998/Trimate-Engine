@@ -10,6 +10,7 @@ import unittest
 import warnings
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -218,18 +219,18 @@ class SQLiteAutomationRepositoryTests(unittest.TestCase):
                 lease_owner=run.lease_owner,
                 lease_checked_at=created_at,
             )
-            notifications.append(
-                repository.enqueue_notification(
-                    snapshot,
-                    priority="digest",
-                    deliver_after=None,
-                    created_at=created_at,
-                    run_id=run.run_id,
-                    lease_token=run.lease_token,
-                    lease_owner=run.lease_owner,
-                    lease_checked_at=created_at,
-                )
+            notification = repository.enqueue_notification(
+                snapshot,
+                priority="digest",
+                deliver_after=None,
+                created_at=created_at,
+                run_id=run.run_id,
+                lease_token=run.lease_token,
+                lease_owner=run.lease_owner,
+                lease_checked_at=created_at,
             )
+            assert notification is not None
+            notifications.append(notification)
         repository.complete_sync_run(
             run.run_id,
             completed_at=self.now + timedelta(minutes=1),
@@ -353,6 +354,67 @@ class SQLiteAutomationRepositoryTests(unittest.TestCase):
             self.assertEqual(replayed_notification, first_notification)
             self.assertEqual(repository.list_snapshots("athlete-001"), [first_snapshot])
             self.assertEqual(repository.list_unread("athlete-001"), [first_notification])
+
+    def test_first_notification_insert_uses_current_off_policy(self) -> None:
+        with TemporaryDirectory() as directory:
+            repository = SQLiteAutomationRepository(Path(directory) / "athlete.sqlite3")
+            repository.save_subscription(self.subscription, next_run_at=self.now)
+            run = repository.claim_due(self.now, owner="analysis-worker", limit=1)[0][1]
+            assert run.lease_token is not None
+            change_set = repository.save_change_set(
+                run.run_id,
+                self.result,
+                created_at=self.now,
+                lease_token=run.lease_token,
+            )
+            snapshot = repository.save_snapshot(
+                change_set,
+                {"period": "2026-10-26"},
+                "low",
+                created_at=self.now,
+                run_id=run.run_id,
+                lease_token=run.lease_token,
+                lease_owner=run.lease_owner,
+                lease_checked_at=self.now,
+            )
+            repository.save_subscription(
+                replace(self.subscription, notification_mode=NotificationMode.OFF),
+                next_run_at=self.now + timedelta(minutes=30),
+            )
+
+            notification = repository.enqueue_notification(
+                snapshot,
+                priority="digest",
+                deliver_after=None,
+                created_at=self.now,
+                run_id=run.run_id,
+                lease_token=run.lease_token,
+                lease_owner=run.lease_owner,
+                lease_checked_at=self.now,
+            )
+
+            self.assertIsNone(notification)
+            self.assertEqual(repository.list_unread("athlete-001"), [])
+
+    def test_existing_notification_replay_remains_readable_when_policy_is_off(self) -> None:
+        with TemporaryDirectory() as directory:
+            repository = SQLiteAutomationRepository(Path(directory) / "athlete.sqlite3")
+            first = self.seed_notifications(repository, count=1)[0]
+            repository.save_subscription(
+                replace(self.subscription, notification_mode=NotificationMode.OFF),
+                next_run_at=self.now + timedelta(minutes=30),
+            )
+            snapshot = repository.list_snapshots("athlete-001")[0]
+
+            replay = repository.enqueue_notification(
+                snapshot,
+                priority="digest",
+                deliver_after=None,
+                created_at=self.now,
+            )
+
+            self.assertEqual(replay, first)
+            self.assertEqual(repository.list_unread("athlete-001"), [first])
 
     def test_analysis_and_notification_identities_support_versions_and_reject_conflicts(
         self,

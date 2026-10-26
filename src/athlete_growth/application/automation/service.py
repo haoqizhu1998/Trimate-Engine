@@ -233,40 +233,18 @@ class AutomaticTrainingLoop:
             attempted += 1
             assert notification.delivery_lease_token is not None
             try:
-                notification = self.automation_repository.renew_delivery_claim(
+                receipt = self.automation_repository.deliver_claimed(
                     notification.notification_id,
+                    self.notification_sink.deliver,
                     lease_token=notification.delivery_lease_token,
                     owner=self.owner,
                     now=self._now(),
-                    lease_duration=self.lease_duration,
                     lease_clock=self._now,
                 )
             except Exception:
                 failed += 1
                 continue
-            try:
-                self.notification_sink.deliver(notification)
-            except Exception as exc:
-                # The claim may expire or be recovered during external delivery.
-                with suppress(Exception):
-                    self.automation_repository.mark_delivery_failed(
-                        notification.notification_id,
-                        f"{type(exc).__name__}: delivery failed",
-                        failed_at=self._now(),
-                        lease_token=notification.delivery_lease_token,
-                        owner=self.owner,
-                    )
-                failed += 1
-                continue
-            try:
-                self.automation_repository.mark_delivered(
-                    notification.notification_id,
-                    delivered_at=self._now(),
-                    lease_token=notification.delivery_lease_token,
-                    owner=self.owner,
-                )
-            except Exception:
-                failed += 1
+            if receipt is None:
                 continue
             delivered += 1
         return DeliverySummary(attempted=attempted, delivered=delivered, failed=failed)
@@ -424,42 +402,46 @@ class AutomaticTrainingLoop:
         notifications = self.automation_repository.list_notifications_for_change_set(
             change_set.change_set_id
         )
-        if subscription.notification_mode is not NotificationMode.OFF and not notifications:
+        current_subscription = self.automation_repository.get_subscription(
+            subscription.athlete_id,
+            subscription.source,
+        )
+        notification_policy = current_subscription or subscription
+        if notification_policy.notification_mode is not NotificationMode.OFF and not notifications:
             selected = self._select_persisted_snapshot(snapshots)
             risk_level = selected.risk_level
             actionable = risk_level in {"moderate", "high"}
             deliver_after = None
             if (
-                subscription.notification_mode is NotificationMode.ACTIONABLE_DIGEST
+                notification_policy.notification_mode is NotificationMode.ACTIONABLE_DIGEST
                 and not actionable
             ):
                 deliver_after = self._next_digest(
                     change_set.created_at,
                     timezone_name,
-                    subscription.digest_hour_local,
+                    notification_policy.digest_hour_local,
                 )
             run = self._renew_owned(run)
             assert run.lease_token is not None
             effect_at = self._now()
-            notifications = [
-                self.automation_repository.enqueue_notification(
-                    selected,
-                    priority="actionable" if actionable else "digest",
-                    deliver_after=deliver_after,
-                    title=f"Training data updated: {risk_level} risk",
-                    body=self._persisted_notification_body(
-                        len(change_set.record_ids),
-                        risk_level,
-                        selected.report,
-                    ),
-                    created_at=effect_at,
-                    run_id=run.run_id,
-                    lease_token=run.lease_token,
-                    lease_owner=self.owner,
-                    lease_checked_at=effect_at,
-                    lease_clock=self._now,
-                )
-            ]
+            notification = self.automation_repository.enqueue_notification(
+                selected,
+                priority="actionable" if actionable else "digest",
+                deliver_after=deliver_after,
+                title=f"Training data updated: {risk_level} risk",
+                body=self._persisted_notification_body(
+                    len(change_set.record_ids),
+                    risk_level,
+                    selected.report,
+                ),
+                created_at=effect_at,
+                run_id=run.run_id,
+                lease_token=run.lease_token,
+                lease_owner=self.owner,
+                lease_checked_at=effect_at,
+                lease_clock=self._now,
+            )
+            notifications = [notification] if notification is not None else []
 
         run = self._renew_owned(run)
         assert run.lease_token is not None
