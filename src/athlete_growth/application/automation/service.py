@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import suppress
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from enum import Enum
@@ -78,6 +79,8 @@ class AutomaticTrainingLoop:
             raise ValueError("owner must not be blank")
         if lease_duration <= timedelta(0):
             raise ValueError("lease_duration must be positive")
+        if automation_repository.database_file.resolve() != record_store.database_file.resolve():
+            raise ValueError("automation and record repositories must use the same database")
         self.automation_repository = automation_repository
         self.record_store = record_store
         self.profile_repository = profile_repository
@@ -181,25 +184,47 @@ class AutomaticTrainingLoop:
         return subscription, run, False
 
     def deliver_pending(self, *, limit: int = 100) -> DeliverySummary:
-        """Attempt each due pending notification once during this pass."""
+        """Claim and attempt a bounded due batch.
+
+        Delivery is at-least-once: claims prevent concurrent sends, but a process
+        crash after macOS accepts a notification and before the receipt is saved
+        can cause a rare replay because the OS sink has no idempotency key.
+        """
 
         self._positive_limit(limit, "limit")
-        due = self.automation_repository.list_pending(self._now())[:limit]
+        due = self.automation_repository.claim_pending(
+            self._now(),
+            owner=self.owner,
+            lease_duration=self.lease_duration,
+            limit=limit,
+        )
         delivered = failed = 0
         for notification in due:
+            assert notification.delivery_lease_token is not None
             try:
                 self.notification_sink.deliver(notification)
             except Exception as exc:
-                self.automation_repository.mark_delivery_failed(
-                    notification.notification_id,
-                    f"{type(exc).__name__}: delivery failed",
-                )
+                # The claim may expire or be recovered during external delivery.
+                with suppress(Exception):
+                    self.automation_repository.mark_delivery_failed(
+                        notification.notification_id,
+                        f"{type(exc).__name__}: delivery failed",
+                        failed_at=self._now(),
+                        lease_token=notification.delivery_lease_token,
+                        owner=self.owner,
+                    )
                 failed += 1
                 continue
-            self.automation_repository.mark_delivered(
-                notification.notification_id,
-                delivered_at=self._now(),
-            )
+            try:
+                self.automation_repository.mark_delivered(
+                    notification.notification_id,
+                    delivered_at=self._now(),
+                    lease_token=notification.delivery_lease_token,
+                    owner=self.owner,
+                )
+            except Exception:
+                failed += 1
+                continue
             delivered += 1
         return DeliverySummary(attempted=len(due), delivered=delivered, failed=failed)
 
@@ -235,12 +260,18 @@ class AutomaticTrainingLoop:
             athlete_id=subscription.athlete_id,
             store=self.record_store,
             raw_dir=self.raw_root / subscription.athlete_id,
+            timezone_name=profile.timezone_name,
         )
         batch = ingestion.fetch(connector, window)
         run = self._renew_owned(run)
         assert run.lease_token is not None
+        athlete_raw_root = self.raw_root / subscription.athlete_id
+        athlete_raw_root.mkdir(parents=True, exist_ok=True, mode=0o700)
         with (
-            TemporaryDirectory(prefix="athlete-growth-ingest-") as staging_directory,
+            TemporaryDirectory(
+                prefix=".staging-",
+                dir=athlete_raw_root,
+            ) as staging_directory,
             self.automation_repository.lease_fenced_transaction(
                 run.run_id,
                 lease_token=run.lease_token,
@@ -261,6 +292,10 @@ class AutomaticTrainingLoop:
                 now=self._now(),
                 connection=connection,
             )
+            projection_record_ids = self.record_store.list_current_ids(
+                subscription.athlete_id,
+                connection=connection,
+            )
             change_set = (
                 self.automation_repository.save_change_set(
                     run.run_id,
@@ -269,6 +304,7 @@ class AutomaticTrainingLoop:
                     lease_token=run.lease_token,
                     connection=connection,
                     lease_clock=self._now,
+                    projection_record_ids=projection_record_ids,
                 )
                 if result.has_changes
                 else None
@@ -314,6 +350,7 @@ class AutomaticTrainingLoop:
             subscription.athlete_id,
             self.record_store,
             timezone_name=timezone_name,
+            projection_record_ids=change_set.projection_record_ids,
         )
         snapshots: list[AnalysisSnapshot] = []
         for affected_date in change_set.affected_dates:
@@ -443,17 +480,17 @@ class AutomaticTrainingLoop:
 
     @staticmethod
     def _weekly_period(end_date: date, timezone_name: str) -> str:
-        timezone = ZoneInfo(timezone_name)
-        end = datetime.combine(end_date + timedelta(days=1), time.min, tzinfo=timezone).astimezone(
-            UTC
-        ) - timedelta(microseconds=1)
-        start = end - timedelta(days=7) + timedelta(microseconds=1)
-        return f"{start.date().isoformat()}/{end_date.isoformat()}"
+        ZoneInfo(timezone_name)
+        start_date = end_date - timedelta(days=6)
+        return f"{start_date.isoformat()}/{end_date.isoformat()}"
 
     def _verify_raw_evidence(self, change_set: DataChangeSet) -> None:
         """Refuse analysis completion when a referenced immutable raw object is absent."""
 
-        for record_id in change_set.record_ids:
+        referenced_record_ids = tuple(
+            dict.fromkeys(change_set.record_ids + change_set.projection_record_ids)
+        )
+        for record_id in referenced_record_ids:
             record = self.record_store.get(record_id)
             if record is None:
                 raise ValueError("change set record is unavailable")
@@ -543,10 +580,38 @@ class AutomaticTrainingLoop:
     def _next_digest(now: datetime, timezone_name: str, hour: int) -> datetime:
         timezone = ZoneInfo(timezone_name)
         local_now = now.astimezone(timezone)
-        candidate = datetime.combine(local_now.date(), time(hour), tzinfo=timezone)
-        if candidate < local_now:
-            candidate += timedelta(days=1)
-        return candidate.astimezone(UTC)
+        for day_offset in range(2):
+            local_candidate = datetime.combine(
+                local_now.date() + timedelta(days=day_offset),
+                time(hour),
+            )
+            candidates = AutomaticTrainingLoop._valid_local_instants(
+                local_candidate,
+                timezone,
+            )
+            if not candidates:
+                for minute_offset in range(1, 24 * 60 + 1):
+                    candidates = AutomaticTrainingLoop._valid_local_instants(
+                        local_candidate + timedelta(minutes=minute_offset),
+                        timezone,
+                    )
+                    if candidates:
+                        break
+            eligible = [candidate for candidate in candidates if candidate >= now]
+            if eligible:
+                return min(eligible)
+        raise ValueError("could not resolve next digest time")
+
+    @staticmethod
+    def _valid_local_instants(local_time: datetime, timezone: ZoneInfo) -> list[datetime]:
+        candidates: set[datetime] = set()
+        for fold in (0, 1):
+            aware = local_time.replace(tzinfo=timezone, fold=fold)
+            utc_candidate = aware.astimezone(UTC)
+            round_trip = utc_candidate.astimezone(timezone)
+            if round_trip.replace(tzinfo=None) == local_time and round_trip.fold == fold:
+                candidates.add(utc_candidate)
+        return sorted(candidates)
 
     @staticmethod
     def _persisted_notification_body(

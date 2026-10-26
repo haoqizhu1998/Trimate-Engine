@@ -52,14 +52,39 @@ class ReportServiceTests(unittest.TestCase):
                     data={"calendar_date": "2026-10-26", "steps": 9000},
                 )
             )
-            reports = service.ReportService(
-                "athlete-001", store, timezone_name="Asia/Shanghai"
-            )
+            reports = service.ReportService("athlete-001", store, timezone_name="Asia/Shanghai")
 
             report = reports.daily(date(2026, 10, 26))
 
             self.assertEqual(report.objective["steps"], 9000)
             self.assertNotIn("objective daily summary", report.data_gaps)
+
+    def test_weekly_period_is_exactly_seven_athlete_local_dates(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = SQLiteRecordStore(Path(directory) / "athlete.sqlite3")
+            reports = service.ReportService("athlete-001", store, timezone_name="Asia/Shanghai")
+
+            report = reports.weekly(date(2026, 10, 26))
+
+        self.assertEqual(report.period, "2026-10-20/2026-10-26")
+
+    def test_weekly_spring_dst_window_excludes_previous_local_date(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = SQLiteRecordStore(Path(directory) / "athlete.sqlite3")
+            store.save(
+                CanonicalRecord.create(
+                    athlete_id="athlete-001",
+                    kind="check-in",
+                    occurred_at=datetime(2026, 3, 4, 4, 30, tzinfo=UTC),
+                    data={"pain": 0},
+                )
+            )
+            reports = service.ReportService("athlete-001", store, timezone_name="America/New_York")
+
+            report = reports.weekly(date(2026, 3, 10))
+
+        self.assertEqual(report.period, "2026-03-04/2026-03-10")
+        self.assertEqual(report.objective["check_in_days"], 0)
 
 
 if __name__ == "__main__":

@@ -276,6 +276,7 @@ class DataChangeSet:
     record_ids: tuple[str, ...]
     affected_dates: tuple[date, ...]
     created_at: datetime
+    projection_record_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         for field_name in ("change_set_id", "run_id", "athlete_id", "source"):
@@ -291,6 +292,10 @@ class DataChangeSet:
             raise ValueError("affected_dates must contain dates")
         object.__setattr__(self, "record_ids", record_ids)
         object.__setattr__(self, "affected_dates", tuple(sorted(set(self.affected_dates))))
+        projection_record_ids = tuple(sorted(set(self.projection_record_ids)))
+        if any(not record_id.strip() for record_id in projection_record_ids):
+            raise ValueError("projection_record_ids must contain non-blank identifiers")
+        object.__setattr__(self, "projection_record_ids", projection_record_ids)
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -379,6 +384,10 @@ class UserNotification:
     delivered_at: datetime | None = None
     delivery_attempts: int = 0
     last_error: str | None = None
+    next_attempt_at: datetime | None = None
+    delivery_lease_token: str | None = None
+    delivery_lease_owner: str | None = None
+    delivery_lease_expires_at: datetime | None = None
 
     def __post_init__(self) -> None:
         for field_name in ("notification_id", "snapshot_id", "athlete_id", "title", "body"):
@@ -387,7 +396,13 @@ class UserNotification:
             raise ValueError("priority must be actionable or digest")
         _require_text(self.policy_version, "policy_version")
         _require_text(self.channel, "channel")
-        for field_name in ("deliver_after", "read_at", "delivered_at"):
+        for field_name in (
+            "deliver_after",
+            "read_at",
+            "delivered_at",
+            "next_attempt_at",
+            "delivery_lease_expires_at",
+        ):
             value = getattr(self, field_name)
             if value is not None:
                 _require_aware(value, field_name)
@@ -400,3 +415,13 @@ class UserNotification:
             raise ValueError("delivery_attempts must be a non-negative integer")
         if self.last_error is not None and not self.last_error.strip():
             raise ValueError("last_error must not be blank")
+        if self.delivery_lease_token is None:
+            if self.delivery_lease_owner is not None or self.delivery_lease_expires_at is not None:
+                raise ValueError("an unclaimed notification cannot have delivery lease metadata")
+        else:
+            _require_text(self.delivery_lease_token, "delivery_lease_token")
+            if self.delivery_lease_owner is None or self.delivery_lease_expires_at is None:
+                raise ValueError("a claimed notification requires owner and expiry")
+            _require_text(self.delivery_lease_owner, "delivery_lease_owner")
+        if self.delivered_at is not None and self.delivery_lease_token is not None:
+            raise ValueError("a delivered notification cannot hold a delivery lease")

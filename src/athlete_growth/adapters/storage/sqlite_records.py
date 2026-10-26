@@ -184,6 +184,56 @@ class SQLiteRecordStore:
             rows = active_connection.execute(query, parameters).fetchall()
         return [self._deserialize(row) for row in rows]
 
+    def list_current_ids(
+        self,
+        athlete_id: str,
+        *,
+        connection: sqlite3.Connection | None = None,
+    ) -> tuple[str, ...]:
+        """Return the current projection identity using the caller's transaction."""
+
+        with self._borrow_connection(connection) as active_connection:
+            rows = active_connection.execute(
+                """
+                SELECT record_id FROM canonical_records
+                WHERE athlete_id = ? AND is_current = 1
+                ORDER BY record_id
+                """,
+                (athlete_id,),
+            ).fetchall()
+        return tuple(row["record_id"] for row in rows)
+
+    def list_by_ids(
+        self,
+        athlete_id: str,
+        record_ids: tuple[str, ...],
+        *,
+        start: datetime | None = None,
+        end: datetime | None = None,
+        connection: sqlite3.Connection | None = None,
+    ) -> list[CanonicalRecord]:
+        """Read exact historical versions from a durable projection watermark."""
+
+        selected = set(record_ids)
+        if not selected:
+            return []
+        clauses = ["athlete_id = ?"]
+        parameters: list[object] = [athlete_id]
+        if start is not None:
+            clauses.append("occurred_at >= ?")
+            parameters.append(start.isoformat())
+        if end is not None:
+            clauses.append("occurred_at <= ?")
+            parameters.append(end.isoformat())
+        query = (
+            "SELECT * FROM canonical_records WHERE "
+            + " AND ".join(clauses)
+            + " ORDER BY occurred_at, record_id"
+        )
+        with self._borrow_connection(connection) as active_connection:
+            rows = active_connection.execute(query, parameters).fetchall()
+        return [self._deserialize(row) for row in rows if row["record_id"] in selected]
+
     def get_cursor(
         self,
         athlete_id: str,

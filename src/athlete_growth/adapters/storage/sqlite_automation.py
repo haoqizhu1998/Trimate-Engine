@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 class SQLiteAutomationRepository:
     """Persist scheduling, sync, analysis, and notification state atomically."""
 
-    _SCHEMA_VERSION = 3
+    _SCHEMA_VERSION = 4
 
     def __init__(self, database_file: Path) -> None:
         self.database_file = database_file
@@ -87,6 +87,24 @@ class SQLiteAutomationRepository:
                 }
                 if not required_run_columns <= self._table_columns(
                     connection, "automation_sync_runs"
+                ):
+                    raise ValueError(
+                        f"automation schema version {self._SCHEMA_VERSION} is incomplete"
+                    )
+                if "projection_record_ids_json" not in self._table_columns(
+                    connection, "data_change_sets"
+                ):
+                    raise ValueError(
+                        f"automation schema version {self._SCHEMA_VERSION} is incomplete"
+                    )
+                required_notification_columns = {
+                    "next_attempt_at",
+                    "delivery_lease_token",
+                    "delivery_lease_owner",
+                    "delivery_lease_expires_at",
+                }
+                if not required_notification_columns <= self._table_columns(
+                    connection, "notification_inbox"
                 ):
                     raise ValueError(
                         f"automation schema version {self._SCHEMA_VERSION} is incomplete"
@@ -188,6 +206,7 @@ class SQLiteAutomationRepository:
                 source TEXT NOT NULL,
                 record_ids_json TEXT NOT NULL,
                 affected_dates_json TEXT NOT NULL,
+                projection_record_ids_json TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 FOREIGN KEY (run_id) REFERENCES automation_sync_runs(run_id)
             )
@@ -224,6 +243,19 @@ class SQLiteAutomationRepository:
                 delivered_at TEXT,
                 delivery_attempts INTEGER NOT NULL DEFAULT 0 CHECK (delivery_attempts >= 0),
                 last_error TEXT,
+                next_attempt_at TEXT NOT NULL,
+                delivery_lease_token TEXT,
+                delivery_lease_owner TEXT,
+                delivery_lease_expires_at TEXT,
+                CHECK (
+                    (delivery_lease_token IS NULL AND delivery_lease_owner IS NULL
+                        AND delivery_lease_expires_at IS NULL)
+                    OR (delivery_lease_token IS NOT NULL
+                        AND length(trim(delivery_lease_token)) > 0
+                        AND delivery_lease_owner IS NOT NULL
+                        AND length(trim(delivery_lease_owner)) > 0
+                        AND delivery_lease_expires_at IS NOT NULL)
+                ),
                 UNIQUE (snapshot_id, policy_version, channel),
                 FOREIGN KEY (snapshot_id) REFERENCES analysis_snapshots(snapshot_id)
             )
@@ -232,21 +264,22 @@ class SQLiteAutomationRepository:
         for statement in statements:
             connection.execute(statement)
         index_statements = (
-            "CREATE INDEX IF NOT EXISTS idx_sync_subscriptions_schema_v3 "
+            "CREATE INDEX IF NOT EXISTS idx_sync_subscriptions_schema_v4 "
             "ON sync_subscriptions(enabled, next_run_at, athlete_id, source)",
-            "CREATE INDEX IF NOT EXISTS idx_automation_sync_runs_latest_schema_v3 "
+            "CREATE INDEX IF NOT EXISTS idx_automation_sync_runs_latest_schema_v4 "
             "ON automation_sync_runs(athlete_id, source, started_at DESC, run_id DESC)",
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_automation_sync_runs_request_schema_v3 "
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_automation_sync_runs_request_schema_v4 "
             "ON automation_sync_runs(request_key) WHERE request_key IS NOT NULL",
-            "CREATE INDEX IF NOT EXISTS idx_automation_sync_runs_recoverable_schema_v3 "
+            "CREATE INDEX IF NOT EXISTS idx_automation_sync_runs_recoverable_schema_v4 "
             "ON automation_sync_runs(status, lease_expires_at, started_at, run_id)",
-            "CREATE INDEX IF NOT EXISTS idx_analysis_snapshots_athlete_schema_v3 "
+            "CREATE INDEX IF NOT EXISTS idx_analysis_snapshots_athlete_schema_v4 "
             "ON analysis_snapshots("
             "athlete_id, created_at, analysis_kind, algorithm_version, snapshot_id)",
-            "CREATE INDEX IF NOT EXISTS idx_notification_inbox_unread_schema_v3 "
+            "CREATE INDEX IF NOT EXISTS idx_notification_inbox_unread_schema_v4 "
             "ON notification_inbox(athlete_id, read_at, created_at, notification_id)",
-            "CREATE INDEX IF NOT EXISTS idx_notification_inbox_pending_schema_v3 "
-            "ON notification_inbox(delivered_at, deliver_after, created_at, notification_id)",
+            "CREATE INDEX IF NOT EXISTS idx_notification_inbox_pending_schema_v4 "
+            "ON notification_inbox(delivered_at, next_attempt_at, delivery_lease_expires_at, "
+            "created_at, notification_id)",
         )
         for statement in index_statements:
             connection.execute(statement)
@@ -307,10 +340,27 @@ class SQLiteAutomationRepository:
             )
         for run in normalized_runs:
             cls._insert_sync_run(connection, run)
+        change_set_columns = source_columns["data_change_sets"]
         for row in source_rows["data_change_sets"]:
             connection.execute(
-                "INSERT INTO data_change_sets VALUES (?, ?, ?, ?, ?, ?, ?)",
-                tuple(row),
+                """
+                INSERT INTO data_change_sets (
+                    change_set_id, run_id, athlete_id, source, record_ids_json,
+                    affected_dates_json, projection_record_ids_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    row["change_set_id"],
+                    row["run_id"],
+                    row["athlete_id"],
+                    row["source"],
+                    row["record_ids_json"],
+                    row["affected_dates_json"],
+                    row["projection_record_ids_json"]
+                    if "projection_record_ids_json" in change_set_columns
+                    else row["record_ids_json"],
+                    row["created_at"],
+                ),
             )
         analysis_columns = source_columns["analysis_snapshots"]
         for row in source_rows["analysis_snapshots"]:
@@ -342,8 +392,9 @@ class SQLiteAutomationRepository:
                 INSERT INTO notification_inbox (
                     notification_id, snapshot_id, athlete_id, policy_version, channel,
                     priority, title, body, deliver_after, created_at, read_at,
-                    delivered_at, delivery_attempts, last_error
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    delivered_at, delivery_attempts, last_error, next_attempt_at,
+                    delivery_lease_token, delivery_lease_owner, delivery_lease_expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     row["notification_id"],
@@ -362,6 +413,18 @@ class SQLiteAutomationRepository:
                     row["delivered_at"],
                     row["delivery_attempts"],
                     row["last_error"],
+                    row["next_attempt_at"]
+                    if "next_attempt_at" in notification_columns
+                    else (row["deliver_after"] or row["created_at"]),
+                    row["delivery_lease_token"]
+                    if "delivery_lease_token" in notification_columns
+                    else None,
+                    row["delivery_lease_owner"]
+                    if "delivery_lease_owner" in notification_columns
+                    else None,
+                    row["delivery_lease_expires_at"]
+                    if "delivery_lease_expires_at" in notification_columns
+                    else None,
                 ),
             )
 
@@ -1173,6 +1236,7 @@ class SQLiteAutomationRepository:
         lease_token: str | None = None,
         connection: sqlite3.Connection | None = None,
         lease_clock: Callable[[], datetime] | None = None,
+        projection_record_ids: tuple[str, ...] | None = None,
     ) -> DataChangeSet:
         created = self._datetime(created_at, "created_at")
         if connection is not None:
@@ -1183,6 +1247,7 @@ class SQLiteAutomationRepository:
                 created=created,
                 lease_token=lease_token,
                 lease_clock=lease_clock,
+                projection_record_ids=projection_record_ids,
             )
         owned_connection = self._connect()
         try:
@@ -1194,6 +1259,7 @@ class SQLiteAutomationRepository:
                 created=created,
                 lease_token=lease_token,
                 lease_clock=lease_clock,
+                projection_record_ids=projection_record_ids,
             )
             owned_connection.commit()
             return change_set
@@ -1213,6 +1279,7 @@ class SQLiteAutomationRepository:
         created: datetime,
         lease_token: str | None,
         lease_clock: Callable[[], datetime] | None,
+        projection_record_ids: tuple[str, ...] | None,
     ) -> DataChangeSet:
         run_row = connection.execute(
             "SELECT * FROM automation_sync_runs WHERE run_id = ?",
@@ -1229,6 +1296,11 @@ class SQLiteAutomationRepository:
             record_ids=tuple(result.changed_record_ids),
             affected_dates=tuple(result.affected_dates),
             created_at=created,
+            projection_record_ids=(
+                tuple(result.changed_record_ids)
+                if projection_record_ids is None
+                else projection_record_ids
+            ),
         )
         row = connection.execute(
             "SELECT * FROM data_change_sets WHERE run_id = ?",
@@ -1241,6 +1313,7 @@ class SQLiteAutomationRepository:
                 or existing.source != change_set.source
                 or existing.record_ids != change_set.record_ids
                 or existing.affected_dates != change_set.affected_dates
+                or existing.projection_record_ids != change_set.projection_record_ids
             ):
                 raise ValueError("change set idempotency conflict")
             return existing
@@ -1256,8 +1329,8 @@ class SQLiteAutomationRepository:
             """
             INSERT INTO data_change_sets (
                 change_set_id, run_id, athlete_id, source, record_ids_json,
-                affected_dates_json, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                affected_dates_json, projection_record_ids_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 change_set.change_set_id,
@@ -1266,6 +1339,7 @@ class SQLiteAutomationRepository:
                 change_set.source,
                 json.dumps(change_set.record_ids, ensure_ascii=False),
                 json.dumps([value.isoformat() for value in change_set.affected_dates]),
+                json.dumps(change_set.projection_record_ids, ensure_ascii=False),
                 change_set.created_at.isoformat(),
             ),
         )
@@ -1518,6 +1592,7 @@ class SQLiteAutomationRepository:
             created_at=created,
             policy_version=policy_version,
             channel=channel,
+            next_attempt_at=deliver_at or created,
         )
         connection = self._connect()
         try:
@@ -1571,8 +1646,9 @@ class SQLiteAutomationRepository:
                     notification_id, snapshot_id, athlete_id, policy_version,
                     channel, priority, title, body, deliver_after, created_at,
                     read_at, delivered_at,
-                    delivery_attempts, last_error
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, 0, NULL)
+                    delivery_attempts, last_error, next_attempt_at,
+                    delivery_lease_token, delivery_lease_owner, delivery_lease_expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, 0, NULL, ?, NULL, NULL, NULL)
                 """,
                 (
                     notification.notification_id,
@@ -1587,6 +1663,9 @@ class SQLiteAutomationRepository:
                     if notification.deliver_after is not None
                     else None,
                     notification.created_at.isoformat(),
+                    notification.next_attempt_at.isoformat()
+                    if notification.next_attempt_at is not None
+                    else notification.created_at.isoformat(),
                 ),
             )
             self._validate_effect_lease(
@@ -1651,12 +1730,90 @@ class SQLiteAutomationRepository:
                 """
                 SELECT * FROM notification_inbox
                 WHERE delivered_at IS NULL
-                  AND (deliver_after IS NULL OR deliver_after <= ?)
-                ORDER BY COALESCE(deliver_after, created_at), created_at, notification_id
+                  AND next_attempt_at <= ?
+                  AND (
+                      delivery_lease_token IS NULL
+                      OR delivery_lease_expires_at <= ?
+                  )
+                ORDER BY next_attempt_at, created_at, notification_id
                 """,
-                (due_at,),
+                (due_at, due_at),
             ).fetchall()
         return [self._notification_from_row(row) for row in rows]
+
+    def claim_pending(
+        self,
+        now: datetime,
+        *,
+        owner: str,
+        lease_duration: timedelta = timedelta(minutes=5),
+        limit: int = 100,
+    ) -> list[UserNotification]:
+        """Atomically lease a bounded, fair batch of due notification deliveries."""
+
+        claimed_at = self._datetime(now, "now")
+        lease_expires_at = self._lease_expiry(claimed_at, lease_duration)
+        if not owner.strip():
+            raise ValueError("owner must not be blank")
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            raise ValueError("limit must be a positive integer")
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                """
+                SELECT notification_id FROM notification_inbox
+                WHERE delivered_at IS NULL
+                  AND next_attempt_at <= ?
+                  AND (
+                      delivery_lease_token IS NULL
+                      OR delivery_lease_expires_at <= ?
+                  )
+                ORDER BY next_attempt_at, created_at, notification_id
+                LIMIT ?
+                """,
+                (claimed_at.isoformat(), claimed_at.isoformat(), limit),
+            ).fetchall()
+            claimed: list[UserNotification] = []
+            for row in rows:
+                token = uuid4().hex
+                cursor = connection.execute(
+                    """
+                    UPDATE notification_inbox
+                    SET delivery_lease_token = ?, delivery_lease_owner = ?,
+                        delivery_lease_expires_at = ?
+                    WHERE notification_id = ? AND delivered_at IS NULL
+                      AND next_attempt_at <= ?
+                      AND (
+                          delivery_lease_token IS NULL
+                          OR delivery_lease_expires_at <= ?
+                      )
+                    """,
+                    (
+                        token,
+                        owner,
+                        lease_expires_at.isoformat(),
+                        row["notification_id"],
+                        claimed_at.isoformat(),
+                        claimed_at.isoformat(),
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise ValueError("notification delivery claim conflict")
+                claimed_row = connection.execute(
+                    "SELECT * FROM notification_inbox WHERE notification_id = ?",
+                    (row["notification_id"],),
+                ).fetchone()
+                assert claimed_row is not None
+                claimed.append(self._notification_from_row(claimed_row))
+            connection.commit()
+            return claimed
+        except BaseException:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        finally:
+            connection.close()
 
     def get_notification(self, notification_id: str) -> UserNotification | None:
         with self._connection() as connection:
@@ -1691,19 +1848,34 @@ class SQLiteAutomationRepository:
         notification_id: str,
         *,
         delivered_at: datetime,
+        lease_token: str | None = None,
+        owner: str | None = None,
     ) -> UserNotification:
-        delivered = self._datetime_text(delivered_at, "delivered_at")
-        with self._connection() as connection:
+        delivered = self._datetime(delivered_at, "delivered_at")
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM notification_inbox WHERE notification_id = ?",
+                (notification_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(notification_id)
+            existing = self._notification_from_row(row)
+            self._validate_delivery_claim(existing, lease_token, owner, delivered)
             cursor = connection.execute(
                 """
                 UPDATE notification_inbox
                 SET delivered_at = COALESCE(delivered_at, ?),
                     delivery_attempts = delivery_attempts
                         + CASE WHEN delivered_at IS NULL THEN 1 ELSE 0 END,
-                    last_error = NULL
+                    last_error = NULL,
+                    delivery_lease_token = NULL,
+                    delivery_lease_owner = NULL,
+                    delivery_lease_expires_at = NULL
                 WHERE notification_id = ?
                 """,
-                (delivered, notification_id),
+                (delivered.isoformat(), notification_id),
             )
             if cursor.rowcount != 1:
                 raise KeyError(notification_id)
@@ -1711,34 +1883,91 @@ class SQLiteAutomationRepository:
                 "SELECT * FROM notification_inbox WHERE notification_id = ?",
                 (notification_id,),
             ).fetchone()
-        assert row is not None
-        return self._notification_from_row(row)
+            assert row is not None
+            result = self._notification_from_row(row)
+            connection.commit()
+            return result
+        except BaseException:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        finally:
+            connection.close()
 
-    def mark_delivery_failed(self, notification_id: str, error: str) -> UserNotification:
+    def mark_delivery_failed(
+        self,
+        notification_id: str,
+        error: str,
+        *,
+        failed_at: datetime | None = None,
+        lease_token: str | None = None,
+        owner: str | None = None,
+    ) -> UserNotification:
         if not error.strip():
             raise ValueError("error must not be blank")
-        with self._connection() as connection:
-            exists = connection.execute(
-                "SELECT 1 FROM notification_inbox WHERE notification_id = ?",
+        failure_time = self._datetime(failed_at or datetime.now(UTC), "failed_at")
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM notification_inbox WHERE notification_id = ?",
                 (notification_id,),
             ).fetchone()
-            if exists is None:
+            if row is None:
                 raise KeyError(notification_id)
+            existing = self._notification_from_row(row)
+            self._validate_delivery_claim(existing, lease_token, owner, failure_time)
+            next_attempt = failure_time + self._delivery_backoff(existing.delivery_attempts + 1)
             connection.execute(
                 """
                 UPDATE notification_inbox
                 SET delivery_attempts = delivery_attempts + 1,
-                    last_error = ?
+                    last_error = ?, next_attempt_at = ?,
+                    delivery_lease_token = NULL,
+                    delivery_lease_owner = NULL,
+                    delivery_lease_expires_at = NULL
                 WHERE notification_id = ? AND delivered_at IS NULL
                 """,
-                (error, notification_id),
+                (error, next_attempt.isoformat(), notification_id),
             )
             row = connection.execute(
                 "SELECT * FROM notification_inbox WHERE notification_id = ?",
                 (notification_id,),
             ).fetchone()
-        assert row is not None
-        return self._notification_from_row(row)
+            assert row is not None
+            result = self._notification_from_row(row)
+            connection.commit()
+            return result
+        except BaseException:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    @staticmethod
+    def _validate_delivery_claim(
+        notification: UserNotification,
+        lease_token: str | None,
+        owner: str | None,
+        checked_at: datetime,
+    ) -> None:
+        if notification.delivery_lease_token is None:
+            if lease_token is not None or owner is not None:
+                raise ValueError("notification delivery lease conflict")
+            return
+        if (
+            lease_token != notification.delivery_lease_token
+            or owner != notification.delivery_lease_owner
+            or notification.delivery_lease_expires_at is None
+            or notification.delivery_lease_expires_at <= checked_at
+        ):
+            raise ValueError("notification delivery lease conflict")
+
+    @staticmethod
+    def _delivery_backoff(attempt: int) -> timedelta:
+        exponent = min(max(attempt - 1, 0), 6)
+        return timedelta(seconds=min(3600, 60 * (2**exponent)))
 
     @staticmethod
     def _identifier(kind: str, *parts: str) -> str:
@@ -1822,6 +2051,7 @@ class SQLiteAutomationRepository:
                 date.fromisoformat(value) for value in json.loads(row["affected_dates_json"])
             ),
             created_at=datetime.fromisoformat(row["created_at"]),
+            projection_record_ids=tuple(json.loads(row["projection_record_ids_json"])),
         )
 
     @staticmethod
@@ -1859,4 +2089,10 @@ class SQLiteAutomationRepository:
             else None,
             delivery_attempts=row["delivery_attempts"],
             last_error=row["last_error"],
+            next_attempt_at=datetime.fromisoformat(row["next_attempt_at"]),
+            delivery_lease_token=row["delivery_lease_token"],
+            delivery_lease_owner=row["delivery_lease_owner"],
+            delivery_lease_expires_at=datetime.fromisoformat(row["delivery_lease_expires_at"])
+            if row["delivery_lease_expires_at"] is not None
+            else None,
         )

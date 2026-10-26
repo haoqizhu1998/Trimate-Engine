@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from time import sleep
+from zoneinfo import ZoneInfo
 
 from athlete_growth.adapters.storage.sqlite_records import SQLiteRecordStore
 from athlete_growth.domain.records import CanonicalRecord, EvidenceRef, JsonValue
@@ -43,10 +44,18 @@ class IngestionResult:
 
 
 class IngestionService:
-    def __init__(self, *, athlete_id: str, store: SQLiteRecordStore, raw_dir: Path) -> None:
+    def __init__(
+        self,
+        *,
+        athlete_id: str,
+        store: SQLiteRecordStore,
+        raw_dir: Path,
+        timezone_name: str = "UTC",
+    ) -> None:
         self.athlete_id = athlete_id
         self.store = store
         self.raw_dir = raw_dir
+        self.timezone = ZoneInfo(timezone_name)
 
     def ingest(
         self,
@@ -211,7 +220,7 @@ class IngestionService:
 
     @staticmethod
     def promote_raw_files(result: IngestionResult) -> None:
-        """Publish transaction-staged immutable raw files after the DB commit."""
+        """Publish staged immutable raw files before the enclosing DB commit."""
 
         for staged, destination in result.staged_raw_files:
             destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -287,15 +296,14 @@ class IngestionService:
             and evidence_identity(existing) == evidence_identity(candidate)
         )
 
-    @staticmethod
-    def _affected_date(record: CanonicalRecord) -> date:
+    def _affected_date(self, record: CanonicalRecord) -> date:
         calendar_date = record.data.get("calendar_date")
         if isinstance(calendar_date, str):
             try:
                 return date.fromisoformat(calendar_date)
             except ValueError:
                 pass
-        return record.occurred_at.date()
+        return record.occurred_at.astimezone(self.timezone).date()
 
     def fetch(
         self,

@@ -145,6 +145,59 @@ class SQLiteAutomationRepositoryTests(unittest.TestCase):
             affected_dates=(self.now.date(),),
         )
 
+    def seed_notifications(
+        self,
+        repository: SQLiteAutomationRepository,
+        *,
+        count: int,
+    ) -> list[UserNotification]:
+        repository.save_subscription(self.subscription, next_run_at=self.now)
+        run = repository.claim_due(
+            self.now,
+            owner="analysis-worker",
+            lease_duration=timedelta(minutes=15),
+            limit=1,
+        )[0][1]
+        assert run.lease_token is not None
+        change_set = repository.save_change_set(
+            run.run_id,
+            self.result,
+            created_at=self.now,
+            lease_token=run.lease_token,
+        )
+        notifications = []
+        for index in range(count):
+            created_at = self.now + timedelta(seconds=index)
+            snapshot = repository.save_snapshot(
+                change_set,
+                {"period": f"2026-10-{26 + index:02d}"},
+                "low",
+                created_at=created_at,
+                analysis_kind="daily",
+                run_id=run.run_id,
+                lease_token=run.lease_token,
+                lease_owner=run.lease_owner,
+                lease_checked_at=created_at,
+            )
+            notifications.append(
+                repository.enqueue_notification(
+                    snapshot,
+                    priority="digest",
+                    deliver_after=None,
+                    created_at=created_at,
+                    run_id=run.run_id,
+                    lease_token=run.lease_token,
+                    lease_owner=run.lease_owner,
+                    lease_checked_at=created_at,
+                )
+            )
+        repository.complete_sync_run(
+            run.run_id,
+            completed_at=self.now + timedelta(minutes=1),
+            lease_token=run.lease_token,
+        )
+        return notifications
+
     def test_persists_automatic_sync_analysis_and_notification_lifecycle(self) -> None:
         later = self.now + timedelta(hours=8)
         report_payload = {
@@ -478,6 +531,8 @@ class SQLiteAutomationRepositoryTests(unittest.TestCase):
             assert run is not None
             snapshots = repository.list_snapshots("athlete-001")
             notifications = repository.list_unread("athlete-001")
+            change_set = repository.get_change_set_for_run("run-v1")
+            assert change_set is not None
 
             self.assertEqual(run.status, "completed")
             self.assertEqual(run.updated_at, run.completed_at)
@@ -488,6 +543,11 @@ class SQLiteAutomationRepositoryTests(unittest.TestCase):
                 "notification-policy/1.0",
             )
             self.assertEqual(notifications[0].channel, "inbox")
+            self.assertEqual(change_set.projection_record_ids, ("record-v1",))
+            self.assertEqual(
+                notifications[0].next_attempt_at,
+                notifications[0].created_at,
+            )
 
             reopened = SQLiteAutomationRepository(database_file)
             self.assertEqual(reopened.get_sync_run("run-v1"), run)
@@ -520,7 +580,7 @@ class SQLiteAutomationRepositoryTests(unittest.TestCase):
                     connection.execute("DELETE FROM automation_sync_runs_automation_v1_backup")
                 connection.rollback()
 
-            self.assertEqual(version, 3)
+            self.assertEqual(version, 4)
             self.assertTrue(
                 {
                     "sync_subscriptions_automation_v1_backup",
@@ -610,7 +670,7 @@ class SQLiteAutomationRepositoryTests(unittest.TestCase):
                     "SELECT COUNT(*) FROM automation_sync_runs_automation_v1_backup"
                 ).fetchone()[0]
 
-            self.assertEqual(version, 3)
+            self.assertEqual(version, 4)
             self.assertEqual(foreign_key_errors, [])
             self.assertEqual(live_tables, 3)
             self.assertEqual(backup_tables, 5)
@@ -1086,6 +1146,124 @@ class SQLiteAutomationRepositoryTests(unittest.TestCase):
 
             reopened = SQLiteAutomationRepository(database_file)
             self.assertEqual(reopened.get_notification(notification.notification_id), read)
+
+    def test_pending_delivery_claims_are_atomic_limited_and_ordered(self) -> None:
+        with TemporaryDirectory() as directory:
+            database_file = Path(directory) / "athlete.sqlite3"
+            first_repository = SQLiteAutomationRepository(database_file)
+            second_repository = SQLiteAutomationRepository(database_file)
+            expected = self.seed_notifications(first_repository, count=3)
+
+            first_claim = first_repository.claim_pending(
+                self.now + timedelta(minutes=2),
+                owner="delivery-a",
+                lease_duration=timedelta(minutes=5),
+                limit=2,
+            )
+            second_claim = second_repository.claim_pending(
+                self.now + timedelta(minutes=2),
+                owner="delivery-b",
+                lease_duration=timedelta(minutes=5),
+                limit=2,
+            )
+
+            self.assertEqual(
+                [item.notification_id for item in first_claim],
+                [item.notification_id for item in expected[:2]],
+            )
+            self.assertEqual(
+                [item.notification_id for item in second_claim],
+                [expected[2].notification_id],
+            )
+            self.assertTrue(all(item.delivery_lease_token for item in first_claim))
+            self.assertTrue(all(item.delivery_lease_owner == "delivery-a" for item in first_claim))
+
+    def test_expired_delivery_claim_is_reclaimed_and_stale_receipt_is_rejected(self) -> None:
+        with TemporaryDirectory() as directory:
+            database_file = Path(directory) / "athlete.sqlite3"
+            repository = SQLiteAutomationRepository(database_file)
+            notification = self.seed_notifications(repository, count=1)[0]
+            claimed = repository.claim_pending(
+                self.now + timedelta(minutes=2),
+                owner="delivery-a",
+                lease_duration=timedelta(minutes=1),
+                limit=1,
+            )[0]
+            reclaimed_at = self.now + timedelta(minutes=4)
+            reclaimed = repository.claim_pending(
+                reclaimed_at,
+                owner="delivery-b",
+                lease_duration=timedelta(minutes=1),
+                limit=1,
+            )[0]
+
+            with self.assertRaisesRegex(ValueError, "delivery lease"):
+                repository.mark_delivered(
+                    notification.notification_id,
+                    delivered_at=reclaimed_at,
+                    lease_token=claimed.delivery_lease_token,
+                    owner="delivery-a",
+                )
+
+            delivered = repository.mark_delivered(
+                notification.notification_id,
+                delivered_at=reclaimed_at,
+                lease_token=reclaimed.delivery_lease_token,
+                owner="delivery-b",
+            )
+            self.assertIsNotNone(delivered.delivered_at)
+            self.assertIsNone(delivered.delivery_lease_token)
+
+    def test_delivery_backoff_is_exponential_and_capped(self) -> None:
+        self.assertEqual(
+            SQLiteAutomationRepository._delivery_backoff(1),
+            timedelta(minutes=1),
+        )
+        self.assertEqual(
+            SQLiteAutomationRepository._delivery_backoff(2),
+            timedelta(minutes=2),
+        )
+        self.assertEqual(
+            SQLiteAutomationRepository._delivery_backoff(20),
+            timedelta(hours=1),
+        )
+
+    def test_change_set_projection_is_idempotent_and_part_of_conflict_detection(self) -> None:
+        with TemporaryDirectory() as directory:
+            repository = SQLiteAutomationRepository(Path(directory) / "athlete.sqlite3")
+            run = repository.start_sync_run(
+                self.subscription,
+                now=self.now,
+                reason="schedule",
+                request_key="projection-slot",
+            )
+            assert run.lease_token is not None
+
+            first = repository.save_change_set(
+                run.run_id,
+                self.result,
+                created_at=self.now,
+                lease_token=run.lease_token,
+                projection_record_ids=("projection-b", "projection-a"),
+            )
+            replay = repository.save_change_set(
+                run.run_id,
+                self.result,
+                created_at=self.now,
+                lease_token=run.lease_token,
+                projection_record_ids=("projection-a", "projection-b"),
+            )
+
+            self.assertEqual(first.projection_record_ids, ("projection-a", "projection-b"))
+            self.assertEqual(replay, first)
+            with self.assertRaisesRegex(ValueError, "idempotency conflict"):
+                repository.save_change_set(
+                    run.run_id,
+                    self.result,
+                    created_at=self.now,
+                    lease_token=run.lease_token,
+                    projection_record_ids=("different",),
+                )
 
     def test_failed_run_and_next_run_schedule_survive_reconstruction(self) -> None:
         next_run_at = self.now + timedelta(minutes=30)

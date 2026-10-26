@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 from athlete_growth.adapters.storage.sqlite_records import SQLiteRecordStore
 from athlete_growth.application.analyze.service import TrainingAnalytics
 from athlete_growth.domain.analytics import AnalysisResult
-from athlete_growth.domain.records import JsonValue
+from athlete_growth.domain.records import CanonicalRecord, JsonValue
 from athlete_growth.domain.safety import SafetyAssessment, SafetyRules
 
 
@@ -28,22 +28,26 @@ class WellnessReport:
 
 class ReportService:
     def __init__(
-        self, athlete_id: str, store: SQLiteRecordStore, *, timezone_name: str = "UTC"
+        self,
+        athlete_id: str,
+        store: SQLiteRecordStore,
+        *,
+        timezone_name: str = "UTC",
+        projection_record_ids: tuple[str, ...] | None = None,
     ) -> None:
         self.athlete_id = athlete_id
         self.store = store
         self.timezone = ZoneInfo(timezone_name)
+        self.projection_record_ids = projection_record_ids
         self.analytics = TrainingAnalytics()
         self.safety_rules = SafetyRules()
 
     def daily(self, calendar_date: date) -> WellnessReport:
         start = datetime.combine(calendar_date, time.min, tzinfo=self.timezone).astimezone(UTC)
-        end = (
-            datetime.combine(calendar_date + timedelta(days=1), time.min, tzinfo=self.timezone)
-            .astimezone(UTC)
-            - timedelta(microseconds=1)
-        )
-        records = self.store.list_current(self.athlete_id, start=start, end=end)
+        end = datetime.combine(
+            calendar_date + timedelta(days=1), time.min, tzinfo=self.timezone
+        ).astimezone(UTC) - timedelta(microseconds=1)
+        records = self._records(start=start, end=end)
         objective_records = [record for record in records if record.kind == "daily-summary"]
         check_ins = [record for record in records if record.kind == "check-in"]
         objective: dict[str, JsonValue] = {}
@@ -51,8 +55,10 @@ class ReportService:
             objective.update(record.data)
         check_in = check_ins[-1] if check_ins else None
         subjective = dict(check_in.data) if check_in else None
-        history_start = start - timedelta(days=28)
-        history = self.store.list_current(self.athlete_id, start=history_start, end=end)
+        history_start = datetime.combine(
+            calendar_date - timedelta(days=27), time.min, tzinfo=self.timezone
+        ).astimezone(UTC)
+        history = self._records(start=history_start, end=end)
         analytics = self.analytics.analyze(history, as_of=end)
         safety = self.safety_rules.assess(
             check_in=check_in,
@@ -83,15 +89,17 @@ class ReportService:
         )
 
     def weekly(self, end_date: date) -> WellnessReport:
-        end = (
-            datetime.combine(end_date + timedelta(days=1), time.min, tzinfo=self.timezone)
-            .astimezone(UTC)
-            - timedelta(microseconds=1)
-        )
-        start = end - timedelta(days=7) + timedelta(microseconds=1)
-        records = self.store.list_current(self.athlete_id, start=start, end=end)
+        start_date = end_date - timedelta(days=6)
+        start = datetime.combine(start_date, time.min, tzinfo=self.timezone).astimezone(UTC)
+        end = datetime.combine(
+            end_date + timedelta(days=1), time.min, tzinfo=self.timezone
+        ).astimezone(UTC) - timedelta(microseconds=1)
+        records = self._records(start=start, end=end)
+        history_start = datetime.combine(
+            end_date - timedelta(days=27), time.min, tzinfo=self.timezone
+        ).astimezone(UTC)
         analytics = self.analytics.analyze(
-            self.store.list_current(self.athlete_id, start=end - timedelta(days=28), end=end),
+            self._records(start=history_start, end=end),
             as_of=end,
         )
         latest_check_in = next(
@@ -107,7 +115,11 @@ class ReportService:
         objective: dict[str, JsonValue] = {
             "activity_count": sum(record.kind == "activity" for record in records),
             "check_in_days": len(
-                {record.occurred_at.date() for record in records if record.kind == "check-in"}
+                {
+                    record.occurred_at.astimezone(self.timezone).date()
+                    for record in records
+                    if record.kind == "check-in"
+                }
             ),
         }
         evidence = tuple(
@@ -117,7 +129,7 @@ class ReportService:
         )
         gaps = list(analytics.data_gaps) + list(safety.data_gaps)
         return WellnessReport(
-            f"{start.date().isoformat()}/{end_date.isoformat()}",
+            f"{start_date.isoformat()}/{end_date.isoformat()}",
             objective,
             dict(latest_check_in.data) if latest_check_in else None,
             analytics,
@@ -125,6 +137,16 @@ class ReportService:
             evidence,
             tuple(dict.fromkeys(gaps)),
             analytics.confidence,
+        )
+
+    def _records(self, *, start: datetime, end: datetime) -> list[CanonicalRecord]:
+        if self.projection_record_ids is None:
+            return self.store.list_current(self.athlete_id, start=start, end=end)
+        return self.store.list_by_ids(
+            self.athlete_id,
+            self.projection_record_ids,
+            start=start,
+            end=end,
         )
 
     @staticmethod
