@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from enum import StrEnum
-from typing import Never, Self, cast
+from typing import cast, overload
 
 from athlete_growth.domain.records import JsonValue
 
@@ -33,98 +33,124 @@ def _require_positive_int(value: int, field_name: str) -> None:
         raise ValueError(f"{field_name} must be a positive integer")
 
 
-class _FrozenJsonObject(dict[str, JsonValue]):
-    """A JSON object that preserves dict compatibility without allowing mutation."""
+type _FrozenJsonValue = str | int | float | bool | None | _FrozenJsonObject | _FrozenJsonArray
+type _JsonIdentity = tuple[object, ...]
 
-    @staticmethod
-    def _immutable() -> Never:
+
+class _FrozenJsonObject(Mapping[str, _FrozenJsonValue]):
+    """An immutable JSON object implemented by composition."""
+
+    __slots__ = ("_identity", "_values")
+
+    def __init__(self, values: dict[str, _FrozenJsonValue]) -> None:
+        self._values = values
+        self._identity = _json_identity(values)
+
+    def __getitem__(self, key: str) -> _FrozenJsonValue:
+        return self._values[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._values)
+
+    def __len__(self) -> int:
+        return len(self._values)
+
+    def __repr__(self) -> str:
+        return repr(self._values)
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, Mapping) and self._identity == _json_identity(other)
+
+    def __hash__(self) -> int:
+        return hash(self._identity)
+
+
+class _FrozenJsonArray(Sequence[_FrozenJsonValue]):
+    """An immutable JSON array implemented by composition."""
+
+    __slots__ = ("_identity", "_values")
+
+    def __init__(self, values: tuple[_FrozenJsonValue, ...]) -> None:
+        self._values = values
+        self._identity = _json_identity(values)
+
+    @overload
+    def __getitem__(self, index: int) -> _FrozenJsonValue: ...
+
+    @overload
+    def __getitem__(self, index: slice) -> tuple[_FrozenJsonValue, ...]: ...
+
+    def __getitem__(self, index: int | slice) -> _FrozenJsonValue | tuple[_FrozenJsonValue, ...]:
+        return self._values[index]
+
+    def __len__(self) -> int:
+        return len(self._values)
+
+    def __repr__(self) -> str:
+        return repr(self._values)
+
+    def __eq__(self, other: object) -> bool:
+        return (
+            isinstance(other, Sequence)
+            and not isinstance(other, (str, bytes, bytearray))
+            and self._identity == _json_identity(other)
+        )
+
+    def __hash__(self) -> int:
+        return hash(self._identity)
+
+    def append(self, value: _FrozenJsonValue) -> None:
+        del value
         raise TypeError("frozen JSON values cannot be mutated")
 
-    def __setitem__(self, key: str, value: JsonValue) -> None:
-        self._immutable()
 
-    def __delitem__(self, key: str) -> None:
-        self._immutable()
-
-    def __ior__(self, value: object) -> Self:
-        self._immutable()
-
-    def clear(self) -> None:
-        self._immutable()
-
-    def pop(self, *args: object, **kwargs: object) -> JsonValue:
-        self._immutable()
-
-    def popitem(self) -> tuple[str, JsonValue]:
-        self._immutable()
-
-    def setdefault(self, key: str, default: JsonValue = None) -> JsonValue:
-        self._immutable()
-
-    def update(self, *args: object, **kwargs: JsonValue) -> None:
-        self._immutable()
+def _json_identity(value: object) -> _JsonIdentity:
+    if value is None:
+        return ("null",)
+    if isinstance(value, bool):
+        return ("bool", value)
+    if isinstance(value, int):
+        return ("int", value)
+    if isinstance(value, float):
+        return ("float", value.hex())
+    if isinstance(value, str):
+        return ("string", value)
+    if isinstance(value, Mapping):
+        return (
+            "object",
+            tuple(sorted((key, _json_identity(item)) for key, item in value.items())),
+        )
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return ("array", tuple(_json_identity(item) for item in value))
+    raise TypeError(f"unsupported JSON value: {type(value).__name__}")
 
 
-class _FrozenJsonArray(list[JsonValue]):
-    """A JSON array that preserves list compatibility without allowing mutation."""
-
-    @staticmethod
-    def _immutable() -> Never:
-        raise TypeError("frozen JSON values cannot be mutated")
-
-    def __setitem__(
-        self,
-        index: object,
-        value: object,
-    ) -> None:
-        self._immutable()
-
-    def __delitem__(self, index: object) -> None:
-        self._immutable()
-
-    def __iadd__(self, values: Iterable[JsonValue]) -> Self:
-        self._immutable()
-
-    def __imul__(self, value: object) -> Self:
-        self._immutable()
-
-    def append(self, value: JsonValue) -> None:
-        self._immutable()
-
-    def clear(self) -> None:
-        self._immutable()
-
-    def extend(self, values: Iterable[JsonValue]) -> None:
-        self._immutable()
-
-    def insert(self, index: object, value: JsonValue) -> None:
-        self._immutable()
-
-    def pop(self, index: object = -1) -> JsonValue:
-        self._immutable()
-
-    def remove(self, value: JsonValue) -> None:
-        self._immutable()
-
-    def reverse(self) -> None:
-        self._immutable()
-
-    def sort(self, *args: object, **kwargs: object) -> None:
-        self._immutable()
-
-
-def _freeze_json(value: JsonValue) -> JsonValue:
+def _freeze_json(value: JsonValue) -> _FrozenJsonValue:
     if isinstance(value, dict):
         return _FrozenJsonObject({key: _freeze_json(item) for key, item in value.items()})
     if isinstance(value, list):
-        return _FrozenJsonArray(_freeze_json(item) for item in value)
+        return _FrozenJsonArray(tuple(_freeze_json(item) for item in value))
     return value
 
 
-def _copy_json_object(value: dict[str, JsonValue]) -> dict[str, JsonValue]:
+def _plain_json(value: object) -> JsonValue:
+    if isinstance(value, Mapping):
+        if any(not isinstance(key, str) for key in value):
+            raise ValueError("JSON object keys must be strings")
+        return {key: _plain_json(item) for key, item in value.items()}
+    if isinstance(value, (list, _FrozenJsonArray)):
+        return [_plain_json(item) for item in value]
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    raise ValueError(f"unsupported JSON value: {type(value).__name__}")
+
+
+def _copy_json_object(
+    value: Mapping[str, JsonValue] | _FrozenJsonObject,
+) -> tuple[_FrozenJsonObject, str]:
     try:
         encoded = json.dumps(
-            value,
+            _plain_json(value),
             ensure_ascii=False,
             allow_nan=False,
             sort_keys=True,
@@ -133,7 +159,8 @@ def _copy_json_object(value: dict[str, JsonValue]) -> dict[str, JsonValue]:
     except (TypeError, ValueError) as exc:
         raise ValueError("report must contain only JSON values") from exc
     decoded = cast(dict[str, JsonValue], json.loads(encoded))
-    return _FrozenJsonObject({key: _freeze_json(item) for key, item in decoded.items()})
+    frozen = _FrozenJsonObject({key: _freeze_json(item) for key, item in decoded.items()})
+    return frozen, encoded
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,6 +201,9 @@ class SyncRun:
     completed_at: datetime | None = None
     error: str | None = None
     request_key: str | None = None
+    lease_owner: str | None = None
+    lease_expires_at: datetime | None = None
+    updated_at: datetime | None = None
 
     def __post_init__(self) -> None:
         for field_name in ("run_id", "athlete_id", "source", "reason"):
@@ -187,6 +217,18 @@ class SyncRun:
                 raise ValueError("completed_at must not be earlier than started_at")
         if self.request_key is not None:
             _require_text(self.request_key, "request_key")
+        if self.lease_owner is not None:
+            _require_text(self.lease_owner, "lease_owner")
+        if self.lease_expires_at is not None:
+            _require_aware(self.lease_expires_at, "lease_expires_at")
+            if self.lease_expires_at < self.started_at:
+                raise ValueError("lease_expires_at must not be earlier than started_at")
+        if self.updated_at is None:
+            object.__setattr__(self, "updated_at", self.completed_at or self.started_at)
+        assert self.updated_at is not None
+        _require_aware(self.updated_at, "updated_at")
+        if self.updated_at < self.started_at:
+            raise ValueError("updated_at must not be earlier than started_at")
         if self.status == "running" and (self.completed_at is not None or self.error is not None):
             raise ValueError("a running sync cannot be completed or have an error")
         if self.status in {"completed", "failed"} and self.completed_at is None:
@@ -195,6 +237,10 @@ class SyncRun:
             raise ValueError("a completed sync cannot have an error")
         if self.status == "failed" and (self.error is None or not self.error.strip()):
             raise ValueError("a failed sync must have an error")
+        if self.status != "running" and (
+            self.lease_owner is not None or self.lease_expires_at is not None
+        ):
+            raise ValueError("a finished sync cannot hold a lease")
 
 
 @dataclass(frozen=True, slots=True)
@@ -229,7 +275,7 @@ class AnalysisSnapshot:
     change_set_id: str
     athlete_id: str
     period: str
-    report: dict[str, JsonValue]
+    report: Mapping[str, JsonValue] | _FrozenJsonObject
     risk_level: str
     created_at: datetime
     analysis_kind: str = "wellness"
@@ -244,19 +290,13 @@ class AnalysisSnapshot:
         _require_text(self.analysis_kind, "analysis_kind")
         _require_text(self.algorithm_version, "algorithm_version")
         _require_aware(self.created_at, "created_at")
-        report = _copy_json_object(self.report)
+        report, report_json = _copy_json_object(self.report)
         object.__setattr__(self, "report", report)
-        object.__setattr__(
-            self,
-            "_report_json",
-            json.dumps(
-                report,
-                ensure_ascii=False,
-                allow_nan=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            ),
-        )
+        object.__setattr__(self, "_report_json", report_json)
+
+    @property
+    def report_json(self) -> str:
+        return self._report_json
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, AnalysisSnapshot):

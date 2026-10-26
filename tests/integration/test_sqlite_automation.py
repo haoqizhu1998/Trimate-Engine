@@ -6,10 +6,12 @@ import subprocess
 import sys
 import unittest
 import warnings
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from threading import Barrier
 from typing import cast
 
 from athlete_growth.adapters.storage.sqlite_automation import SQLiteAutomationRepository
@@ -21,6 +23,104 @@ from athlete_growth.application.automation import (
 )
 from athlete_growth.application.ingest.service import IngestionResult
 from athlete_growth.domain.records import JsonValue
+
+
+def _seed_v1_database(database_file: Path, *, invalid_run: bool = False) -> None:
+    completed_at = None if invalid_run else "2026-10-26T12:01:00+00:00"
+    with closing(sqlite3.connect(database_file)) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE sync_subscriptions (
+                athlete_id TEXT NOT NULL,
+                source TEXT NOT NULL,
+                interval_minutes INTEGER NOT NULL,
+                lookback_days INTEGER NOT NULL,
+                notification_mode TEXT NOT NULL,
+                digest_hour_local INTEGER NOT NULL,
+                enabled INTEGER NOT NULL,
+                next_run_at TEXT NOT NULL,
+                PRIMARY KEY (athlete_id, source)
+            );
+            CREATE TABLE automation_sync_runs (
+                run_id TEXT PRIMARY KEY,
+                athlete_id TEXT NOT NULL,
+                source TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                status TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                completed_at TEXT,
+                error TEXT
+            );
+            CREATE TABLE data_change_sets (
+                change_set_id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL UNIQUE,
+                athlete_id TEXT NOT NULL,
+                source TEXT NOT NULL,
+                record_ids_json TEXT NOT NULL,
+                affected_dates_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (run_id) REFERENCES automation_sync_runs(run_id)
+            );
+            CREATE TABLE analysis_snapshots (
+                snapshot_id TEXT PRIMARY KEY,
+                change_set_id TEXT NOT NULL,
+                athlete_id TEXT NOT NULL,
+                period TEXT NOT NULL,
+                report_json TEXT NOT NULL,
+                risk_level TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE (change_set_id, period),
+                FOREIGN KEY (change_set_id) REFERENCES data_change_sets(change_set_id)
+            );
+            CREATE TABLE notification_inbox (
+                notification_id TEXT PRIMARY KEY,
+                snapshot_id TEXT NOT NULL UNIQUE,
+                athlete_id TEXT NOT NULL,
+                priority TEXT NOT NULL,
+                title TEXT NOT NULL,
+                body TEXT NOT NULL,
+                deliver_after TEXT,
+                created_at TEXT NOT NULL,
+                read_at TEXT,
+                delivered_at TEXT,
+                delivery_attempts INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT,
+                FOREIGN KEY (snapshot_id) REFERENCES analysis_snapshots(snapshot_id)
+            );
+            INSERT INTO sync_subscriptions VALUES (
+                'athlete-001', 'garmin-cn', 30, 3,
+                'actionable-digest', 20, 1, '2026-10-26T12:30:00+00:00'
+            );
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO automation_sync_runs VALUES (
+                'run-v1', 'athlete-001', 'garmin-cn', 'schedule',
+                'completed', '2026-10-26T12:00:00+00:00', ?, NULL
+            )
+            """,
+            (completed_at,),
+        )
+        connection.executescript(
+            """
+            INSERT INTO data_change_sets VALUES (
+                'change-v1', 'run-v1', 'athlete-001', 'garmin-cn',
+                '["record-v1"]', '["2026-10-26"]', '2026-10-26T12:01:00+00:00'
+            );
+            INSERT INTO analysis_snapshots VALUES (
+                'snapshot-v1', 'change-v1', 'athlete-001', '2026-10-26',
+                '{"period":"2026-10-26","signal":true}', 'low',
+                '2026-10-26T12:01:00+00:00'
+            );
+            INSERT INTO notification_inbox VALUES (
+                'notification-v1', 'snapshot-v1', 'athlete-001', 'digest',
+                'Analysis ready', 'Open the product.', NULL,
+                '2026-10-26T12:01:00+00:00', NULL, NULL, 0, NULL
+            );
+            """
+        )
+        connection.commit()
 
 
 class SQLiteAutomationRepositoryTests(unittest.TestCase):
@@ -265,18 +365,30 @@ class SQLiteAutomationRepositoryTests(unittest.TestCase):
             second_repository = SQLiteAutomationRepository(database_file)
             first_repository.save_subscription(self.subscription, next_run_at=self.now)
 
-            first_claim = first_repository.claim_due(self.now)
-            second_claim = second_repository.claim_due(self.now)
+            first_claim = first_repository.claim_due(
+                self.now,
+                owner="worker-a",
+                lease_duration=timedelta(hours=1),
+            )
+            second_claim = second_repository.claim_due(
+                self.now,
+                owner="worker-b",
+                lease_duration=timedelta(hours=1),
+            )
 
             self.assertEqual(len(first_claim), 1)
             self.assertEqual(second_claim, [])
             claimed_subscription, claimed_run = first_claim[0]
             self.assertEqual(claimed_subscription, self.subscription)
             self.assertIsNotNone(claimed_run.request_key)
-            self.assertGreater(
-                first_repository.get_next_run_at("athlete-001", "garmin-cn"),
-                self.now,
+            self.assertEqual(claimed_run.lease_owner, "worker-a")
+            self.assertEqual(
+                claimed_run.lease_expires_at,
+                self.now + timedelta(hours=1),
             )
+            next_run_at = first_repository.get_next_run_at("athlete-001", "garmin-cn")
+            assert next_run_at is not None
+            self.assertGreater(next_run_at, self.now)
 
             reconstructed = SQLiteAutomationRepository(database_file)
             self.assertEqual(reconstructed.claim_due(self.now), [])
@@ -284,16 +396,196 @@ class SQLiteAutomationRepositoryTests(unittest.TestCase):
                 reconstructed.latest_sync_run("athlete-001", "garmin-cn"),
                 claimed_run,
             )
+            self.assertEqual(
+                reconstructed.list_recoverable_runs(self.now + timedelta(minutes=59)),
+                [],
+            )
 
-            reconstructed.save_subscription(self.subscription, next_run_at=self.now)
-            replayed_claim = reconstructed.claim_due(self.now)
-            self.assertEqual(replayed_claim, [(self.subscription, claimed_run)])
+            next_slot = self.now + timedelta(minutes=30)
+            reconstructed.schedule_next(self.subscription, next_run_at=next_slot)
+            self.assertEqual(
+                reconstructed.claim_due(
+                    next_slot,
+                    owner="worker-c",
+                    lease_duration=timedelta(minutes=30),
+                ),
+                [],
+            )
+
+            lease_expired_at = self.now + timedelta(hours=1)
+            self.assertEqual(
+                reconstructed.list_recoverable_runs(lease_expired_at),
+                [claimed_run],
+            )
+            reclaimed = reconstructed.reclaim_sync_run(
+                claimed_run.run_id,
+                now=lease_expired_at,
+                owner="worker-b",
+                lease_duration=timedelta(minutes=30),
+            )
+            self.assertEqual(reclaimed.run_id, claimed_run.run_id)
+            self.assertEqual(reclaimed.request_key, claimed_run.request_key)
+            self.assertEqual(reclaimed.lease_owner, "worker-b")
+            self.assertEqual(
+                reclaimed.lease_expires_at,
+                lease_expired_at + timedelta(minutes=30),
+            )
+            self.assertEqual(reconstructed.list_recoverable_runs(lease_expired_at), [])
+            self.assertEqual(
+                reconstructed.claim_due(
+                    lease_expired_at,
+                    owner="worker-c",
+                    lease_duration=timedelta(minutes=30),
+                ),
+                [],
+            )
             with closing(sqlite3.connect(database_file)) as connection:
                 run_count = connection.execute(
                     "SELECT COUNT(*) FROM automation_sync_runs WHERE request_key = ?",
                     (claimed_run.request_key,),
                 ).fetchone()[0]
             self.assertEqual(run_count, 1)
+
+    def test_migrates_v1_schema_atomically_and_reopens_idempotently(self) -> None:
+        with TemporaryDirectory() as directory:
+            database_file = Path(directory) / "athlete.sqlite3"
+            _seed_v1_database(database_file)
+
+            repository = SQLiteAutomationRepository(database_file)
+            run = repository.get_sync_run("run-v1")
+            assert run is not None
+            snapshots = repository.list_snapshots("athlete-001")
+            notifications = repository.list_unread("athlete-001")
+
+            self.assertEqual(run.status, "completed")
+            self.assertEqual(run.updated_at, run.completed_at)
+            self.assertEqual(snapshots[0].analysis_kind, "wellness")
+            self.assertEqual(snapshots[0].algorithm_version, "wellness-report/1.0")
+            self.assertEqual(
+                notifications[0].policy_version,
+                "notification-policy/1.0",
+            )
+            self.assertEqual(notifications[0].channel, "inbox")
+
+            reopened = SQLiteAutomationRepository(database_file)
+            self.assertEqual(reopened.get_sync_run("run-v1"), run)
+            self.assertEqual(reopened.list_snapshots("athlete-001"), snapshots)
+            with closing(sqlite3.connect(database_file)) as connection:
+                version = connection.execute(
+                    "SELECT version FROM automation_schema_version WHERE singleton = 1"
+                ).fetchone()[0]
+                table_names = {
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT name FROM sqlite_master WHERE type = 'table'"
+                    ).fetchall()
+                }
+                run_columns = {
+                    row[1]
+                    for row in connection.execute(
+                        "PRAGMA table_info(automation_sync_runs)"
+                    ).fetchall()
+                }
+                run_ddl = connection.execute(
+                    "SELECT sql FROM sqlite_master WHERE type = 'table' "
+                    "AND name = 'automation_sync_runs'"
+                ).fetchone()[0]
+                foreign_key_errors = connection.execute("PRAGMA foreign_key_check").fetchall()
+                backup_run_count = connection.execute(
+                    "SELECT COUNT(*) FROM automation_sync_runs_automation_v1_backup"
+                ).fetchone()[0]
+                with self.assertRaisesRegex(sqlite3.IntegrityError, "read-only backup"):
+                    connection.execute("DELETE FROM automation_sync_runs_automation_v1_backup")
+                connection.rollback()
+
+            self.assertEqual(version, 2)
+            self.assertTrue(
+                {
+                    "sync_subscriptions_automation_v1_backup",
+                    "automation_sync_runs_automation_v1_backup",
+                    "data_change_sets_automation_v1_backup",
+                    "analysis_snapshots_automation_v1_backup",
+                    "notification_inbox_automation_v1_backup",
+                }
+                <= table_names
+            )
+            self.assertTrue(
+                {"request_key", "lease_owner", "lease_expires_at", "updated_at"} <= run_columns
+            )
+            self.assertIn("completed_at >= started_at", run_ddl)
+            self.assertEqual(foreign_key_errors, [])
+            self.assertEqual(backup_run_count, 1)
+
+    def test_invalid_v1_run_aborts_migration_without_partial_schema(self) -> None:
+        with TemporaryDirectory() as directory:
+            database_file = Path(directory) / "athlete.sqlite3"
+            _seed_v1_database(database_file, invalid_run=True)
+
+            with self.assertRaisesRegex(ValueError, "invalid legacy sync run"):
+                SQLiteAutomationRepository(database_file)
+
+            with closing(sqlite3.connect(database_file)) as connection:
+                table_names = {
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT name FROM sqlite_master WHERE type = 'table'"
+                    ).fetchall()
+                }
+                snapshot_columns = {
+                    row[1]
+                    for row in connection.execute(
+                        "PRAGMA table_info(analysis_snapshots)"
+                    ).fetchall()
+                }
+                completed_at = connection.execute(
+                    "SELECT completed_at FROM automation_sync_runs WHERE run_id = 'run-v1'"
+                ).fetchone()[0]
+
+            self.assertNotIn("automation_schema_version", table_names)
+            self.assertFalse(any(name.endswith("_backup") for name in table_names))
+            self.assertNotIn("analysis_kind", snapshot_columns)
+            self.assertIsNone(completed_at)
+
+    def test_concurrent_constructors_serialize_v1_migration(self) -> None:
+        with TemporaryDirectory() as directory:
+            database_file = Path(directory) / "athlete.sqlite3"
+            _seed_v1_database(database_file)
+            barrier = Barrier(2)
+
+            def construct_and_read() -> str:
+                barrier.wait()
+                repository = SQLiteAutomationRepository(database_file)
+                run = repository.get_sync_run("run-v1")
+                assert run is not None
+                return run.run_id
+
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                results = list(executor.map(lambda _: construct_and_read(), range(2)))
+
+            self.assertEqual(results, ["run-v1", "run-v1"])
+            with closing(sqlite3.connect(database_file)) as connection:
+                version = connection.execute(
+                    "SELECT version FROM automation_schema_version WHERE singleton = 1"
+                ).fetchone()[0]
+                foreign_key_errors = connection.execute("PRAGMA foreign_key_check").fetchall()
+                live_tables = connection.execute(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' "
+                    "AND name IN ('automation_sync_runs', 'analysis_snapshots', "
+                    "'notification_inbox')"
+                ).fetchone()[0]
+                backup_tables = connection.execute(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' "
+                    "AND name LIKE '%_automation_v1_backup'"
+                ).fetchone()[0]
+                backup_run_count = connection.execute(
+                    "SELECT COUNT(*) FROM automation_sync_runs_automation_v1_backup"
+                ).fetchone()[0]
+
+            self.assertEqual(version, 2)
+            self.assertEqual(foreign_key_errors, [])
+            self.assertEqual(live_tables, 3)
+            self.assertEqual(backup_tables, 5)
+            self.assertEqual(backup_run_count, 1)
 
     def test_direct_scheduled_start_requires_a_stable_request_key(self) -> None:
         with TemporaryDirectory() as directory:
@@ -576,13 +868,19 @@ class SQLiteAutomationRepositoryTests(unittest.TestCase):
         first_signal = cast(dict[str, JsonValue], signals[0])
 
         with self.assertRaises(TypeError):
-            snapshot.report["period"] = "changed"
+            snapshot.report["period"] = "changed"  # type: ignore[index]
         with self.assertRaises(TypeError):
             details["score"] = 0
         with self.assertRaises(TypeError):
             signals.append("changed")
         with self.assertRaises(TypeError):
             first_signal["value"] = 0
+        with self.assertRaises(TypeError):
+            dict.__setitem__(snapshot.report, "period", "base-mutator-bypass")  # type: ignore[arg-type]
+        with self.assertRaises(TypeError):
+            dict.__setitem__(details, "score", 0)
+        with self.assertRaises(TypeError):
+            list.__setitem__(signals, 0, "base-mutator-bypass")
 
         cast(dict[str, JsonValue], payload["details"])["score"] = 0
         self.assertEqual(details["score"], 82)
