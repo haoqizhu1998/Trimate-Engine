@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import sqlite3
 import unittest
+from collections.abc import Callable
 from contextlib import closing
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -20,7 +22,9 @@ from athlete_growth.application.automation import (
     SyncSubscription,
 )
 from athlete_growth.application.ingest.service import IngestionService
+from athlete_growth.application.report.service import ReportService
 from athlete_growth.domain.athlete import AthleteProfile
+from athlete_growth.domain.safety import RiskLevel
 from athlete_growth.ports.data_source import (
     HealthStatus,
     RawSourceRecord,
@@ -39,21 +43,34 @@ class MutableClock:
 
 
 class MutableConnector:
-    def __init__(self, source: str, records: tuple[RawSourceRecord, ...]) -> None:
+    def __init__(
+        self,
+        source: str,
+        records: tuple[RawSourceRecord, ...],
+        *,
+        after_fetch: Callable[[], None] | None = None,
+        next_cursor: str | None = None,
+    ) -> None:
         self.source = source
         self.records = records
+        self.after_fetch = after_fetch
+        self.next_cursor = next_cursor
         self.error: Exception | None = None
         self.windows: list[SyncWindow] = []
+        self.cursors: list[str | None] = []
 
     def capabilities(self) -> SourceCapabilities:
         return SourceCapabilities(self.source, None, ("daily-summary", "check-in"))
 
     def sync(self, window: SyncWindow, cursor: str | None) -> SyncBatch:
-        del cursor
         self.windows.append(window)
+        self.cursors.append(cursor)
         if self.error is not None:
             raise self.error
-        return SyncBatch(self.records)
+        batch = SyncBatch(self.records, self.next_cursor)
+        if self.after_fetch is not None:
+            self.after_fetch()
+        return batch
 
     def healthcheck(self) -> HealthStatus:
         return HealthStatus(True, "ready")
@@ -386,6 +403,251 @@ class AutomaticTrainingLoopTests(unittest.TestCase):
         self.assertEqual((second_delivery.delivered, second_delivery.failed), (1, 0))
         self.assertIsNotNone(delivered.delivered_at)
         self.assertEqual(delivered.delivery_attempts, 2)
+
+    def test_highest_risk_daily_snapshot_drives_one_immediate_notification(self) -> None:
+        self.add_profile()
+        self.add_subscription("watch")
+        connector = MutableConnector(
+            "watch",
+            (
+                _record(
+                    "watch",
+                    "check-in",
+                    "older-high",
+                    occurred_at=datetime(2026, 10, 25, 8, 0, tzinfo=UTC),
+                    pain=8,
+                    fatigue=2,
+                    soreness=2,
+                    illness=False,
+                ),
+                _record(
+                    "watch",
+                    "check-in",
+                    "newer-low",
+                    occurred_at=datetime(2026, 10, 26, 8, 0, tzinfo=UTC),
+                    pain=0,
+                    fatigue=2,
+                    soreness=2,
+                    illness=False,
+                ),
+            ),
+        )
+        sink = RecordingSink()
+
+        result = self.loop({"watch": connector}, sink).run_once()
+
+        snapshots = self.automation.list_snapshots("athlete-001")
+        daily = {item.period: item for item in snapshots if item.analysis_kind == "daily"}
+        notifications = self.automation.list_unread("athlete-001")
+        self.assertEqual((result.snapshots, result.notifications), (3, 1))
+        self.assertEqual(daily["2026-10-25"].risk_level, "high")
+        self.assertEqual(daily["2026-10-26"].risk_level, "low")
+        self.assertEqual(len(notifications), 1)
+        self.assertEqual(notifications[0].snapshot_id, daily["2026-10-25"].snapshot_id)
+        self.assertEqual(notifications[0].priority, "actionable")
+        self.assertIsNone(notifications[0].deliver_after)
+        self.assertEqual(
+            [item.notification_id for item in sink.delivered],
+            [notifications[0].notification_id],
+        )
+
+    def test_weekly_snapshot_can_outrank_daily_for_notification(self) -> None:
+        self.add_profile()
+        self.add_subscription("watch")
+        connector = MutableConnector(
+            "watch",
+            (
+                _record(
+                    "watch",
+                    "check-in",
+                    "daily-low",
+                    occurred_at=datetime(2026, 10, 26, 8, 0, tzinfo=UTC),
+                    pain=0,
+                    fatigue=2,
+                    soreness=2,
+                    illness=False,
+                ),
+            ),
+        )
+        real_weekly = ReportService.weekly
+
+        def high_risk_weekly(service: ReportService, end_date: date):
+            report = real_weekly(service, end_date)
+            return replace(
+                report,
+                safety=replace(
+                    report.safety,
+                    level=RiskLevel.HIGH,
+                    reasons=("weekly risk outranks daily",),
+                    actions=("Review the weekly risk before training.",),
+                ),
+            )
+
+        with patch.object(ReportService, "weekly", high_risk_weekly):
+            self.loop({"watch": connector}).run_once()
+
+        snapshots = self.automation.list_snapshots("athlete-001")
+        daily = next(item for item in snapshots if item.analysis_kind == "daily")
+        weekly = next(item for item in snapshots if item.analysis_kind == "weekly")
+        notification = self.automation.list_unread("athlete-001")[0]
+        self.assertEqual(daily.risk_level, "low")
+        self.assertEqual(weekly.risk_level, "high")
+        self.assertEqual(notification.snapshot_id, weekly.snapshot_id)
+        self.assertEqual(notification.priority, "actionable")
+        self.assertIsNone(notification.deliver_after)
+
+    def test_equal_risk_prefers_latest_daily_snapshot_over_weekly(self) -> None:
+        self.add_profile()
+        self.add_subscription("watch")
+        connector = MutableConnector(
+            "watch",
+            tuple(
+                _record(
+                    "watch",
+                    "check-in",
+                    f"high-{day}",
+                    occurred_at=datetime(2026, 10, day, 8, 0, tzinfo=UTC),
+                    pain=8,
+                    fatigue=2,
+                    soreness=2,
+                    illness=False,
+                )
+                for day in (25, 26)
+            ),
+        )
+
+        self.loop({"watch": connector}).run_once()
+
+        snapshots = self.automation.list_snapshots("athlete-001")
+        latest_daily = next(
+            item
+            for item in snapshots
+            if item.analysis_kind == "daily" and item.period == "2026-10-26"
+        )
+        weekly = next(item for item in snapshots if item.analysis_kind == "weekly")
+        notification = self.automation.list_unread("athlete-001")[0]
+        self.assertEqual((latest_daily.risk_level, weekly.risk_level), ("high", "high"))
+        self.assertEqual(notification.snapshot_id, latest_daily.snapshot_id)
+
+    def test_fetch_uses_and_advances_the_persisted_cursor(self) -> None:
+        self.add_profile()
+        self.add_subscription("watch")
+        self.records.set_cursor("athlete-001", "watch", "cursor-before", self.clock())
+        connector = MutableConnector(
+            "watch",
+            (
+                _record(
+                    "watch",
+                    "check-in",
+                    "cursor-record",
+                    occurred_at=datetime(2026, 10, 26, 8, 0, tzinfo=UTC),
+                    pain=0,
+                ),
+            ),
+            next_cursor="cursor-after",
+        )
+
+        result = self.loop({"watch": connector}).run_once(limit=1)
+
+        self.assertEqual((result.completed, result.failed), (1, 0))
+        self.assertEqual(connector.cursors, ["cursor-before"])
+        self.assertEqual(
+            self.records.get_cursor("athlete-001", "watch"),
+            "cursor-after",
+        )
+
+    def test_reclaim_during_fetch_prevents_stale_worker_mutation(self) -> None:
+        self.add_profile()
+        self.add_subscription("watch")
+
+        def reclaim_during_fetch() -> None:
+            stale = self.automation.latest_sync_run("athlete-001", "watch")
+            assert stale is not None
+            self.clock.now += timedelta(minutes=11)
+            self.automation.reclaim_sync_run(
+                stale.run_id,
+                now=self.clock(),
+                owner="takeover-worker",
+                lease_duration=timedelta(minutes=5),
+            )
+
+        connector = MutableConnector(
+            "watch",
+            (
+                _record(
+                    "watch",
+                    "check-in",
+                    "must-not-persist",
+                    occurred_at=datetime(2026, 10, 26, 8, 0, tzinfo=UTC),
+                    pain=0,
+                ),
+            ),
+            after_fetch=reclaim_during_fetch,
+        )
+
+        result = self.loop({"watch": connector}).run_once(limit=1)
+
+        reclaimed = self.automation.latest_sync_run("athlete-001", "watch")
+        assert reclaimed is not None
+        self.assertEqual((result.claimed, result.completed, result.failed), (1, 0, 1))
+        self.assertEqual(reclaimed.status, "running")
+        self.assertEqual(reclaimed.lease_owner, "takeover-worker")
+        self.assertEqual(self.records.list_current("athlete-001"), [])
+        self.assertEqual(self.table_count("data_change_sets"), 0)
+        self.assertFalse((self.root / "raw" / "athlete-001").exists())
+
+    def test_each_due_run_is_claimed_just_in_time(self) -> None:
+        self.add_profile()
+        self.add_subscription("a-slow")
+        self.add_subscription("b-fast")
+        initial_now = self.clock.now
+
+        def advance_during_first_fetch() -> None:
+            self.clock.now += timedelta(minutes=6)
+
+        first = MutableConnector(
+            "a-slow",
+            (
+                _record(
+                    "a-slow",
+                    "check-in",
+                    "first",
+                    occurred_at=datetime(2026, 10, 26, 8, 0, tzinfo=UTC),
+                    pain=0,
+                ),
+            ),
+            after_fetch=advance_during_first_fetch,
+        )
+        second = MutableConnector(
+            "b-fast",
+            (
+                _record(
+                    "b-fast",
+                    "check-in",
+                    "second",
+                    occurred_at=datetime(2026, 10, 26, 8, 0, tzinfo=UTC),
+                    pain=0,
+                ),
+            ),
+        )
+
+        result = self.loop({"a-slow": first, "b-fast": second}).run_once(limit=2)
+
+        first_run = self.automation.latest_sync_run("athlete-001", "a-slow")
+        second_run = self.automation.latest_sync_run("athlete-001", "b-fast")
+        assert first_run is not None and second_run is not None
+        self.assertEqual((result.claimed, result.completed, result.failed), (2, 2, 0))
+        self.assertEqual(first_run.started_at, initial_now)
+        self.assertEqual(second_run.started_at, initial_now + timedelta(minutes=6))
+        self.assertEqual(len(self.records.list_current("athlete-001")), 2)
+
+    def test_digest_is_due_at_the_exact_configured_local_hour(self) -> None:
+        boundary = datetime(2026, 10, 26, 15, 0, tzinfo=UTC)
+
+        self.assertEqual(
+            AutomaticTrainingLoop._next_digest(boundary, "Asia/Shanghai", 23),
+            boundary,
+        )
 
     def test_expired_claim_is_recovered_with_same_run_id(self) -> None:
         self.add_profile()

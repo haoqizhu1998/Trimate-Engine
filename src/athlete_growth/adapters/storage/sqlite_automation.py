@@ -6,7 +6,7 @@ import hashlib
 import json
 import os
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator
 from contextlib import contextmanager
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -548,6 +548,7 @@ class SQLiteAutomationRepository:
         limit: int = 100,
         owner: str | None = None,
         lease_duration: timedelta = timedelta(minutes=15),
+        exclude: Collection[tuple[str, str]] = (),
     ) -> list[tuple[SyncSubscription, SyncRun]]:
         claimed_at = self._datetime(now, "now")
         lease_expires_at = self._lease_expiry(claimed_at, lease_duration)
@@ -557,11 +558,20 @@ class SQLiteAutomationRepository:
             raise ValueError("owner must not be blank")
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
             raise ValueError("limit must be a positive integer")
+        excluded = tuple(sorted(set(exclude)))
+        exclusion_sql = "".join(
+            " AND NOT (sync_subscriptions.athlete_id = ? AND sync_subscriptions.source = ?)"
+            for _ in excluded
+        )
+        parameters: list[object] = [claimed_at.isoformat()]
+        for athlete_id, source in excluded:
+            parameters.extend((athlete_id, source))
+        parameters.append(limit)
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
             rows = connection.execute(
-                """
+                f"""
                 SELECT * FROM sync_subscriptions
                 WHERE enabled = 1 AND next_run_at <= ?
                   AND NOT EXISTS (
@@ -570,10 +580,11 @@ class SQLiteAutomationRepository:
                         AND active_run.source = sync_subscriptions.source
                         AND active_run.status = 'running'
                   )
+                  {exclusion_sql}
                 ORDER BY next_run_at, athlete_id, source
                 LIMIT ?
                 """,
-                (claimed_at.isoformat(), limit),
+                tuple(parameters),
             ).fetchall()
             claims: list[tuple[SyncSubscription, SyncRun]] = []
             for row in rows:

@@ -57,6 +57,13 @@ class _RunOutcome:
     notifications: int = 0
 
 
+@dataclass(frozen=True, slots=True)
+class _SnapshotResult:
+    snapshot: AnalysisSnapshot
+    report: WellnessReport
+    affected_date: date | None
+
+
 class AutomaticTrainingLoop:
     """Claim bounded work, sync it, analyze real changes, and deliver due notices."""
 
@@ -97,41 +104,18 @@ class AutomaticTrainingLoop:
 
         self._positive_limit(limit, "limit")
         self._positive_limit(delivery_limit, "delivery_limit")
-        now = self._now()
-        work: list[tuple[SyncSubscription, SyncRun]] = []
-        recovered_count = 0
-
-        for expired in self.automation_repository.list_recoverable_runs(now)[:limit]:
-            subscription = self.automation_repository.get_subscription(
-                expired.athlete_id, expired.source
-            )
-            if subscription is None:
-                continue
-            try:
-                reclaimed = self.automation_repository.reclaim_sync_run(
-                    expired.run_id,
-                    now=now,
-                    owner=self.owner,
-                    lease_duration=self.lease_duration,
-                )
-            except (KeyError, ValueError):
-                continue
-            work.append((subscription, reclaimed))
-            recovered_count += 1
-
-        remaining = limit - len(work)
-        if remaining:
-            work.extend(
-                self.automation_repository.claim_due(
-                    now,
-                    owner=self.owner,
-                    lease_duration=self.lease_duration,
-                    limit=remaining,
-                )
-            )
-
+        claimed_count = recovered_count = 0
         completed = changed = no_changes = failed = snapshots = notifications = 0
-        for subscription, run in work:
+        skipped_recoveries: set[str] = set()
+        processed_subscriptions: set[tuple[str, str]] = set()
+        for _ in range(limit):
+            claimed = self._claim_next(skipped_recoveries, processed_subscriptions)
+            if claimed is None:
+                break
+            subscription, run, recovered = claimed
+            processed_subscriptions.add((subscription.athlete_id, subscription.source))
+            claimed_count += 1
+            recovered_count += int(recovered)
             try:
                 outcome = self._process(subscription, run)
             except Exception as exc:
@@ -146,7 +130,7 @@ class AutomaticTrainingLoop:
 
         delivery = self.deliver_pending(limit=delivery_limit)
         return AutomationSummary(
-            claimed=len(work),
+            claimed=claimed_count,
             recovered=recovered_count,
             completed=completed,
             changed=changed,
@@ -157,6 +141,48 @@ class AutomaticTrainingLoop:
             delivered=delivery.delivered,
             delivery_failures=delivery.failed,
         )
+
+    def _claim_next(
+        self,
+        skipped_recoveries: set[str],
+        processed_subscriptions: set[tuple[str, str]],
+    ) -> tuple[SyncSubscription, SyncRun, bool] | None:
+        """Acquire at most one run using a fresh clock reading."""
+
+        now = self._now()
+        for expired in self.automation_repository.list_recoverable_runs(now):
+            subscription_key = (expired.athlete_id, expired.source)
+            if expired.run_id in skipped_recoveries or subscription_key in processed_subscriptions:
+                continue
+            subscription = self.automation_repository.get_subscription(
+                expired.athlete_id, expired.source
+            )
+            if subscription is None:
+                skipped_recoveries.add(expired.run_id)
+                continue
+            try:
+                reclaimed = self.automation_repository.reclaim_sync_run(
+                    expired.run_id,
+                    now=self._now(),
+                    owner=self.owner,
+                    lease_duration=self.lease_duration,
+                )
+            except (KeyError, ValueError):
+                skipped_recoveries.add(expired.run_id)
+                continue
+            return subscription, reclaimed, True
+
+        claims = self.automation_repository.claim_due(
+            self._now(),
+            owner=self.owner,
+            lease_duration=self.lease_duration,
+            limit=1,
+            exclude=processed_subscriptions,
+        )
+        if not claims:
+            return None
+        subscription, run = claims[0]
+        return subscription, run, False
 
     def deliver_pending(self, *, limit: int = 100) -> DeliverySummary:
         """Attempt each due pending notification once during this pass."""
@@ -188,13 +214,7 @@ class AutomaticTrainingLoop:
         if run.lease_token is None:
             raise ValueError("automatic sync run is missing a lease token")
 
-        run = self.automation_repository.renew_lease(
-            run.run_id,
-            run.lease_token,
-            owner=self.owner,
-            now=self._now(),
-            lease_duration=self.lease_duration * 2,
-        )
+        run = self._renew_owned(run)
         assert run.lease_token is not None
         existing_change_set = self.automation_repository.get_change_set_for_run(run.run_id)
         if existing_change_set is not None:
@@ -220,8 +240,13 @@ class AutomaticTrainingLoop:
             store=self.record_store,
             raw_dir=self.raw_root / subscription.athlete_id,
         )
-        result = ingestion.sync(connector, window)
+        cursor = self.record_store.get_cursor(subscription.athlete_id, subscription.source)
+        batch = connector.sync(window, cursor)
+        run = self._renew_owned(run)
+        result = ingestion.ingest(batch)
+        run = self._renew_owned(run)
         if not result.has_changes:
+            run = self._renew_owned(run)
             self.automation_repository.complete_sync_run(
                 run.run_id,
                 completed_at=self._now(),
@@ -235,6 +260,7 @@ class AutomaticTrainingLoop:
             created_at=self._now(),
             lease_token=run.lease_token,
         )
+        run = self._renew_owned(run)
         return self._analyze_and_complete(
             subscription,
             run,
@@ -256,19 +282,33 @@ class AutomaticTrainingLoop:
             self.record_store,
             timezone_name=timezone_name,
         )
-        daily_results: list[tuple[AnalysisSnapshot, WellnessReport]] = []
+        snapshot_results: list[_SnapshotResult] = []
         for affected_date in change_set.affected_dates:
             report = report_service.daily(affected_date)
-            daily_results.append(
-                (self._save_report(change_set, report, analysis_kind="daily"), report)
+            run = self._renew_owned(run)
+            snapshot_results.append(
+                _SnapshotResult(
+                    self._save_report(change_set, report, analysis_kind="daily"),
+                    report,
+                    affected_date,
+                )
             )
         latest_date = change_set.affected_dates[-1]
         weekly = report_service.weekly(latest_date)
-        self._save_report(change_set, weekly, analysis_kind="weekly")
+        run = self._renew_owned(run)
+        snapshot_results.append(
+            _SnapshotResult(
+                self._save_report(change_set, weekly, analysis_kind="weekly"),
+                weekly,
+                None,
+            )
+        )
 
         notification_count = 0
         if subscription.notification_mode is not NotificationMode.OFF:
-            notification_snapshot, notification_report = daily_results[-1]
+            selected = self._select_notification(snapshot_results)
+            notification_snapshot = selected.snapshot
+            notification_report = selected.report
             risk_level = notification_report.safety.level.value
             actionable = risk_level in {"moderate", "high"}
             priority = "actionable" if actionable else "digest"
@@ -282,6 +322,7 @@ class AutomaticTrainingLoop:
                     timezone_name,
                     subscription.digest_hour_local,
                 )
+            run = self._renew_owned(run)
             self.automation_repository.enqueue_notification(
                 notification_snapshot,
                 priority=priority,
@@ -296,6 +337,7 @@ class AutomaticTrainingLoop:
             )
             notification_count = 1
 
+        run = self._renew_owned(run)
         self.automation_repository.complete_sync_run(
             run.run_id,
             completed_at=self._now(),
@@ -303,8 +345,21 @@ class AutomaticTrainingLoop:
         )
         return _RunOutcome(
             changed=True,
-            snapshots=len(daily_results) + 1,
+            snapshots=len(snapshot_results),
             notifications=notification_count,
+        )
+
+    @staticmethod
+    def _select_notification(results: list[_SnapshotResult]) -> _SnapshotResult:
+        risk_order = {"unknown": 0, "low": 1, "moderate": 2, "high": 3}
+        return max(
+            results,
+            key=lambda result: (
+                risk_order[result.report.safety.level.value],
+                result.affected_date is not None,
+                result.affected_date or date.min,
+                result.snapshot.snapshot_id,
+            ),
         )
 
     def _save_report(
@@ -327,15 +382,42 @@ class AutomaticTrainingLoop:
         if run.lease_token is None:
             return
         try:
+            run = self._renew_owned(run)
+            assert run.lease_token is not None
             self.automation_repository.fail_sync_run(
                 run.run_id,
                 error=f"{type(error).__name__}: automatic sync failed",
                 completed_at=self._now(),
                 lease_token=run.lease_token,
             )
-        except (KeyError, ValueError):
+        except Exception:
             # A concurrent recovery may already own or have finished this run.
             return
+
+    def _renew_owned(self, run: SyncRun) -> SyncRun:
+        """Atomically revalidate ownership and extend the current lease."""
+
+        if run.lease_token is None:
+            raise ValueError("automatic sync run is missing a lease token")
+        now = self._now()
+        current = self.automation_repository.get_sync_run(run.run_id)
+        if (
+            current is None
+            or current.status != "running"
+            or current.lease_token != run.lease_token
+            or current.lease_owner != self.owner
+            or current.lease_expires_at is None
+            or current.lease_expires_at <= now
+        ):
+            raise ValueError("automatic sync run lease is no longer owned")
+        assert current.lease_token is not None
+        return self.automation_repository.renew_lease(
+            current.run_id,
+            current.lease_token,
+            owner=self.owner,
+            now=now,
+            lease_duration=(current.lease_expires_at - now) + self.lease_duration,
+        )
 
     def _now(self) -> datetime:
         now = self.clock()
@@ -369,7 +451,7 @@ class AutomaticTrainingLoop:
         timezone = ZoneInfo(timezone_name)
         local_now = now.astimezone(timezone)
         candidate = datetime.combine(local_now.date(), time(hour), tzinfo=timezone)
-        if candidate <= local_now:
+        if candidate < local_now:
             candidate += timedelta(days=1)
         return candidate.astimezone(UTC)
 
