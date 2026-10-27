@@ -6,7 +6,7 @@
 
 已经落地的自动路径是：Garmin 中国区本地会话只读轮询 → 原始证据与标准记录 → 真实变化集 → 确定性日报/周报及安全规则 → 本地 Inbox → macOS Notification Center。macOS `launchd` 可在用户登录会话中周期性唤起一次有界 Worker。
 
-尚未落地的路径包括官方 Garmin 商业 Push/OAuth、GPT/WorkBuddy/Coze 的 MCP/Plugin/OpenAPI 传输、邮件/移动端通知、Windows/Linux 服务安装器以及托管多用户 Worker。图中虚线均表示这些未来适配器。
+已落地只读 stdio MCP 传输。尚未落地的路径包括官方 Garmin 商业 Push/OAuth、ChatGPT 网页插件与 Tunnel 端到端接入、WorkBuddy/Coze 适配、HTTP/OpenAPI、邮件/移动端通知、Windows/Linux 服务安装器以及托管多用户 Worker。图中虚线均表示这些未来适配器。
 
 ## 2. 系统关系
 
@@ -51,6 +51,7 @@ adapters        ┘         │             ▲
 - `adapters/`：Garmin 中国区、文件、SQLite、原始保险库、AI Provider、macOS 通知和 `launchd`。
 - `interfaces/cli/`：当前用户和运维入口。
 - `interfaces/host/`：返回 JSON 安全结果的宿主无关函数 facade；当前自动化 CLI 复用它。它不是已经完成的 MCP、HTTP 或某个模型宿主插件。
+- `interfaces/mcp/`：把现有应用层只读命令暴露为本地 stdio MCP；不包含凭据或远程身份管理。
 
 未来 GPT、WorkBuddy 和 Coze 适配器必须调用同一个 facade/应用用例，不复制训练算法、安全规则或持久化状态。
 

@@ -23,6 +23,7 @@ dev = [
 
 [project.scripts]
 athlete-growth = "athlete_growth.interfaces.cli.main:main"
+athlete-growth-mcp = "athlete_growth.interfaces.mcp.server:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/athlete_growth"]

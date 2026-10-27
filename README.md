@@ -13,10 +13,13 @@
 - 仅在标准记录实际变化时自动运行确定性日报/周报和安全规则；
 - 持久化通知 Inbox、macOS 系统通知、失败重试与崩溃恢复；
 - `launchd` 用户级后台调度器，以及查询、强制运行、安装和卸载 CLI。
+- 面向 GPT/Codex 等宿主的只读本地 stdio MCP 工具：同步状态、日报、周报、目标和未读通知。
 
-尚未实现：GPT/WorkBuddy/Coze 的 MCP、Plugin 或 OpenAPI 传输；OAuth/OIDC 与官方 Garmin 商业 Push；邮件和移动端投递；Windows Task Scheduler 与 Linux systemd 安装器；独立 Web/App；托管、多用户常驻服务。现有 AI Provider 代码和宿主无关 Python facade 不等于这些宿主传输已经可用。
+尚未实现：ChatGPT 网页端插件的账号侧安装与远程连接、WorkBuddy/Coze 适配、HTTP/OpenAPI 传输；OAuth/OIDC 与官方 Garmin 商业 Push；邮件和移动端投递；Windows Task Scheduler 与 Linux systemd 安装器；独立 Web/App；托管、多用户常驻服务。本地 MCP 适配器不等于 ChatGPT 插件已经安装。
 
 本仓库没有声称已经在某位用户的 Mac 上完成 Garmin 登录或真实后台安装验证。真实使用仍需用户亲自完成登录、首次检查，并明确选择是否安装 `launchd`。
+
+本地 MCP 与 ChatGPT 私有连接方式见 [GPT 对话接入](docs/chatgpt-mcp.md)。
 
 ## 自动闭环怎样工作
 

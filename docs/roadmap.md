@@ -12,7 +12,7 @@
 | 3 计划与反馈 | ✅ 本地代码完成 | 完整 Garmin 写回适配器和 UI |
 | 4 多模型解释 | 🟡 Provider 与路由代码完成 | 用户授权后的真实云调用验收；无托管模型服务 |
 | 5 恢复、营养、赛事 | ✅ 本地/文件闭环完成 | 实时天气和赛事商业服务 |
-| 5.5 自动闭环与宿主交付 | 🟡 本地核心与 macOS 适配器完成 | GPT/WorkBuddy/Coze 传输、官方 Push、其他平台服务和多渠道通知 |
+| 5.5 自动闭环与宿主交付 | 🟡 本地核心、macOS 适配器和只读 stdio MCP 完成 | ChatGPT 网页插件/Tunnel、WorkBuddy/Coze、官方 Push、其他平台服务和多渠道通知 |
 | 6 产品化与商业化 | ⬜ 未开发 | 独立 Web/App、托管、多用户、发行、许可证与商业化 |
 
 ## 阶段 0：工程与数据边界
@@ -116,10 +116,11 @@
 - macOS Notification Center；
 - macOS `launchd` 安装/卸载，以及状态和一次运行 CLI；
 - JSON-safe 的宿主无关自动化 facade。
+- 只读 stdio MCP 工具（状态、日报、周报、目标、未读通知）。
 
 ### 仍待实现
 
-- GPT/Codex 的 MCP/Plugin/OpenAPI 产品传输与安装包；
+- ChatGPT 网页插件/Tunnel 端到端连接、可写 MCP 工具与 HTTP/OpenAPI 传输；
 - WorkBuddy MCP/Skill/Workflow 和 Coze Plugin/OpenAPI/Workflow；
 - 完整版本化 Tool Catalog、对话式引导状态机和跨宿主续接；
 - 官方 Garmin 商业 OAuth 和 Push/Ping-Pull；
@@ -127,7 +128,7 @@
 - Windows Task Scheduler、Linux systemd 与容器化常驻 Worker；
 - 远程身份映射、OAuth/OIDC 和托管多用户运行。
 
-当前 GPT/Codex 可以作为帮助用户理解和执行本地步骤的对话宿主，但产品尚没有可安装的 GPT 传输适配器。未来所有宿主都必须复用同一 facade 和确定性核心。
+当前已可供本地 MCP 宿主启动只读传输；ChatGPT 网页端仍需要用户账号侧插件、权限和私有 Tunnel。未来所有宿主都必须复用同一确定性核心。
 
 ## 阶段 6：独立产品、发布与商业化
 

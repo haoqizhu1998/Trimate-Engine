@@ -34,7 +34,7 @@
 | 后台安装 | 🟡 | macOS 用户级 `launchd` 安装/卸载适配器 | 用户尚需明确安装和验证；无 Windows/Linux 安装器 |
 | 运维可见性 | ✅ | 策略、下次运行、最近运行、积压、最近分析、Inbox CLI | 长期健康 Dashboard |
 | 宿主无关接口 | ✅ | 自动化与通知的 JSON-safe Python facade | 尚不是完整版本化 Tool Catalog |
-| GPT/Codex 产品传输 | ⬜ | 当前可作为协助用户操作 CLI 的对话宿主 | MCP/Plugin/OpenAPI 安装包未实现 |
+| GPT/Codex 产品传输 | 🟡 | 已有只读 stdio MCP 工具并通过本机协议测试 | ChatGPT 账号侧插件、私有隧道与端到端对话调用尚未完成；HTTP/OpenAPI 未实现 |
 | WorkBuddy / Coze | ⬜ | 目标是复用同一 facade | MCP、Skill、Workflow、Plugin/OpenAPI 未实现 |
 | 独立 Web/App 与托管 | ⬜ | 无 | Stage 6：Web/App、多用户、支付、商业托管与发布 |
 
