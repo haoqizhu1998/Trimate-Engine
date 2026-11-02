@@ -113,8 +113,7 @@
         "preview_sport_calibration",
         "confirm_sport_calibration"
       ],
-      "availability": "active",
-      "origin": "trimate"
+      "availability": "active"
     },
     {
       "id": "body-assessment",
@@ -126,8 +125,7 @@
         "get_training_load_context",
         "get_sport_baseline"
       ],
-      "availability": "active",
-      "origin": "trimate"
+      "availability": "active"
     },
     {
       "id": "injury-risk",
@@ -137,8 +135,7 @@
         "get_today_report",
         "assess_return_to_training"
       ],
-      "availability": "active",
-      "origin": "trimate"
+      "availability": "active"
     },
     {
       "id": "training-load",
@@ -149,8 +146,7 @@
         "get_recent_check_ins",
         "get_today_report"
       ],
-      "availability": "active",
-      "origin": "trimate"
+      "availability": "active"
     },
     {
       "id": "workout-feedback",
@@ -166,8 +162,7 @@
         "preview_plan_execution",
         "confirm_plan_execution"
       ],
-      "availability": "active",
-      "origin": "trimate"
+      "availability": "active"
     },
     {
       "id": "weekly-review",
@@ -181,8 +176,7 @@
         "get_recent_check_ins",
         "list_training_plans"
       ],
-      "availability": "active",
-      "origin": "trimate"
+      "availability": "active"
     },
     {
       "id": "training-plan",
@@ -199,8 +193,7 @@
         "preview_plan_update",
         "confirm_plan"
       ],
-      "availability": "active",
-      "origin": "trimate"
+      "availability": "active"
     },
     {
       "id": "training-nutrition-coach",
@@ -211,8 +204,7 @@
         "preview_fueling_plan",
         "preview_fueling_logistics"
       ],
-      "availability": "active",
-      "origin": "trimate"
+      "availability": "active"
     },
     {
       "id": "periodic-training-summary",
@@ -222,8 +214,7 @@
         "get_periodic_training_summary",
         "render_periodic_training_poster"
       ],
-      "availability": "active",
-      "origin": "trimate"
+      "availability": "active"
     },
     {
       "id": "running-form-analysis",
@@ -235,8 +226,7 @@
         "get_running_form_job",
         "get_running_form_contact_sheet"
       ],
-      "availability": "active",
-      "origin": "trimate"
+      "availability": "active"
     },
     {
       "id": "training-memory",
@@ -247,8 +237,7 @@
         "confirm_training_memory",
         "list_training_memory"
       ],
-      "availability": "active",
-      "origin": "trimate"
+      "availability": "active"
     }
   ]
 }

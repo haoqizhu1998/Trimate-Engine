@@ -1,4 +1,4 @@
-"""Private, asynchronous execution adapter for the original TriMate video engine."""
+"""Private, asynchronous execution adapter for the Trimate video engine."""
 
 from __future__ import annotations
 

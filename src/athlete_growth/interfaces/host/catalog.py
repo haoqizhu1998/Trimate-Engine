@@ -114,7 +114,7 @@ CAPABILITIES: tuple[dict[str, object], ...] = (
             "running-form-install-model", "running-form-runtime",
         ],
         "note": (
-            "Video is staged locally; asynchronous TriMate scoring requires optional "
+            "Video is staged locally; asynchronous Trimate scoring requires optional "
             "MediaPipe dependencies and a private pose model."
         ),
     },

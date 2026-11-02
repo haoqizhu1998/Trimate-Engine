@@ -13,6 +13,9 @@ class AgentBundleTests(unittest.TestCase):
     def test_exported_bundle_uses_existing_tool_contract_and_is_portable(self) -> None:
         manifest = bundle.load_manifest()
         with tempfile.TemporaryDirectory() as tmp:
+            old = Path(tmp) / "out" / "generic" / "trimate-provenance.json"
+            old.parent.mkdir(parents=True)
+            old.write_text("{}", encoding="utf-8")
             output = bundle.build_bundle(Path(tmp) / "out")
             metadata = json.loads((output / "bundle.json").read_text(encoding="utf-8"))
             self.assertEqual(metadata["capability_version"], "1.18")
@@ -29,6 +32,7 @@ class AgentBundleTests(unittest.TestCase):
                 manifest,
             )
             self.assertTrue((output / "generic" / "agent.md").is_file())
+            self.assertFalse(old.exists())
             generic_text = (output / "generic" / "agent.md").read_text(encoding="utf-8")
             self.assertTrue((codex / "experience" / "host-contract.md").is_file())
             docs = codex / "experience" / "docs"
@@ -48,10 +52,11 @@ class AgentBundleTests(unittest.TestCase):
                 (skills / "training-plan" / "references" / "periodization.md").is_file()
             )
 
-    def test_trimate_skill_sources_remain_verbatim(self) -> None:
+    def test_all_skills_are_product_owned_and_active(self) -> None:
         manifest = bundle.load_manifest()
-        source = [skill for skill in manifest["skills"] if skill.get("origin") == "trimate"]
-        self.assertEqual(len(source), 11)
+        source = manifest["skills"]
+        self.assertEqual(len(source), 17)
+        self.assertTrue(all("origin" not in skill for skill in source))
         self.assertEqual(
             sum(skill.get("availability") == "source_only" for skill in source), 0
         )

@@ -55,7 +55,7 @@ def build_workbuddy_expert(output: Path, *, author_email: str = "contact@example
     (output / "agents").mkdir()
     (output / "avatars").mkdir()
     (output / "skills").mkdir()
-    for shared in ("manifest.json", "host-contract.md", "trimate-provenance.json"):
+    for shared in ("manifest.json", "host-contract.md"):
         source = EXPERIENCE / shared
         if source.is_file():
             shutil.copy2(source, output / shared)
@@ -199,7 +199,7 @@ def build_workbuddy_local_skill(output: Path, expert: Path) -> Path:
     if output.exists():
         shutil.rmtree(output)
     output.mkdir(parents=True)
-    for name in ("manifest.json", "host-contract.md", "trimate-provenance.json"):
+    for name in ("manifest.json", "host-contract.md"):
         source = expert / name
         if source.is_file():
             shutil.copy2(source, output / name)
@@ -219,7 +219,7 @@ def build_workbuddy_local_skill(output: Path, expert: Path) -> Path:
         "当用户询问个人训练、身体状态、目标、计划、比赛、数据连接或产品使用时，"
         "先读取同目录 `agent.md`，由 Trimate 识别意图，再按 `manifest.json` 和 "
         "`agent.md` 路由读取 `skills/<场景 ID>/SKILL.md`。"
-        "可组合多个场景方法；原版三途 Skill 先核对 `host-contract.md`。\n\n"
+        "可组合多个场景方法；调用工具前先核对 `host-contract.md`。\n\n"
         "个人数据与写入只能通过用户本机的 athlete-growth MCP。"
         "先调用 `get_onboarding_status` 和 `get_capability_catalog` 确认连接；"
         "工具不可用时说明缺口，不得依据聊天历史伪造个人分析。"

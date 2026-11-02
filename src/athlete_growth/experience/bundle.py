@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import re
 import shutil
@@ -57,18 +56,6 @@ def load_manifest() -> dict[str, object]:
     if not isinstance(source, str) or not _source_file(source).read_text(encoding="utf-8").strip():
         raise ValueError("missing agent source")
     available = {str(tool["name"]) for tool in tool_catalog()}
-    provenance = EXPERIENCE / "trimate-provenance.json"
-    if provenance.is_file():
-        copied = json.loads(provenance.read_text(encoding="utf-8"))
-        hashes = copied.get("sha256")
-        if not isinstance(hashes, dict):
-            raise ValueError("invalid TriMate source provenance")
-        for relative, digest in hashes.items():
-            if not isinstance(relative, str) or not isinstance(digest, str):
-                raise ValueError("invalid TriMate source provenance")
-            actual = hashlib.sha256(_source_file(relative).read_bytes()).hexdigest()
-            if actual != digest:
-                raise ValueError(f"TriMate source changed: {relative}")
     ids: set[str] = set()
     for skill in skills:
         if not isinstance(skill, dict):
@@ -128,7 +115,9 @@ def build_bundle(output: Path) -> Path:
         shutil.rmtree(legacy_skill)
     (codex_experience / "skills").mkdir(parents=True, exist_ok=True)
     (generic / "skills").mkdir(parents=True, exist_ok=True)
-    for name in ("host-contract.md", "trimate-provenance.json"):
+    for target in (codex_experience, generic):
+        (target / "trimate-provenance.json").unlink(missing_ok=True)
+    for name in ("host-contract.md",):
         shared = EXPERIENCE / name
         if shared.is_file():
             shutil.copy2(shared, codex_experience / name)
@@ -145,7 +134,7 @@ def build_bundle(output: Path) -> Path:
         target = codex_experience / "skills" / skill_id
         shutil.copytree(source.parent, target, dirs_exist_ok=True)
         shutil.copytree(source.parent, generic / "skills" / skill_id, dirs_exist_ok=True)
-        status = "（原文保留，当前不可执行）" if record.get("availability") == "source_only" else ""
+        status = "（当前不可执行）" if record.get("availability") == "source_only" else ""
         generic_routes.append(
             f"- `{skill_id}`{status}: [skills/{skill_id}/SKILL.md](skills/{skill_id}/SKILL.md)"
         )

@@ -194,7 +194,7 @@ TOOL_SPECS: dict[str, tuple[str, dict[str, object], tuple[str, ...], bool]] = {
         True,
     ),
     "render_periodic_training_poster": (
-        "Render the TriMate training summary poster from the current athlete's observed period; "
+        "Render the Trimate training summary poster from the current athlete's observed period; "
         "returns image pixels without a private file path.",
         {
             "cycle_type": {

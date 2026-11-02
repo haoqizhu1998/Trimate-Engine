@@ -1,1 +1,1 @@
-"""TriMate poster renderer and bundled icon assets."""
+"""Trimate poster renderer and bundled icon assets."""

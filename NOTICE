@@ -1,10 +1,5 @@
 Trimate
 Copyright 2026 Mucci
 
-The Agent and Skill materials described in docs/trimate-capability-migration.md
-include files carried forward from the author's TriMate (三途) project:
-https://github.com/haoqizhu1998/TriMate
-
-The copied files and their SHA-256 provenance are listed in
-experience/trimate-provenance.json. This project is not affiliated with Garmin
-or COROS. Names of external products remain the property of their owners.
+This project is not affiliated with Garmin or COROS. Names of external
+products remain the property of their owners.

@@ -1,4 +1,4 @@
-"""Evidence-bounded calendar summaries for TriMate's periodic summary Skill."""
+"""Evidence-bounded calendar summaries for Trimate's periodic summary Skill."""
 
 from __future__ import annotations
 

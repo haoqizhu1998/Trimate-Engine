@@ -39,7 +39,7 @@ GPT/Codex、WorkBuddy、Coze 是对话载体；佳明、高驰是产品通用设
 | 系统通知 | 🟡 | macOS Notification Center、投递租约、指数退避、至少一次语义 | 通知权限和真实横幅待用户验收；无邮件/移动端投递 |
 | 后台安装 | 🟡 | macOS 用户级 `launchd` 与 Windows 用户级任务安装/卸载适配器 | 用户尚需明确安装和验证；Windows 真实机器验收与 Linux 安装器待补 |
 | 运维可见性 | ✅ | 策略、下次运行、最近运行、积压、最近分析、Inbox CLI | 长期健康 Dashboard |
-| Trimate Agent / 产品 Skill | 🟡 | 产品自有 Agent 定义、17 个登记 Skill（11 个三途原版，均有工具入口）、Codex 项目入口、Codex/通用 LLM 包构建器、WorkBuddy 本地 ZIP 与原文/工具契约检查 | 补齐多周训练量渐进处方、完整营养记录与跨模型真实对话行为评测；跑姿视频需用户本机安装可选视觉环境与模型；WorkBuddy 客户端验收与 Coze 适配 |
+| Trimate Agent / 产品 Skill | 🟡 | 产品自有 Agent 定义、17 个产品 Skill（均有工具入口）、Codex 项目入口、Codex/通用 LLM 包构建器、WorkBuddy 本地 ZIP 与工具契约检查 | 补齐多周训练量渐进处方、完整营养记录与跨模型真实对话行为评测；跑姿视频需用户本机安装可选视觉环境与模型；WorkBuddy 客户端验收与 Coze 适配 |
 | 宿主无关接口 | 🟡 | 版本化能力目录；档案、活动、质量、报告、目标/计划、Check-in、恢复、营养、赛事、成长及自动化的 Python facade | 各工具仍有不同输出形状；统一结果 envelope 和持久化引导状态机未完成 |
 | GPT/Codex 产品传输 | 🟡 | 本地 stdio MCP 覆盖上述适合对话的能力；当前项目 Codex 已完成原生工具连接与同步状态实测 | ChatGPT 网页插件/私有隧道未完成；新增工具需重启宿主加载；HTTP/OpenAPI 未实现 |
 | WorkBuddy / Coze | 🟡 | WorkBuddy 本地上传 Skill ZIP、Mac 安装包、本机 MCP 配置与个人高驰官方 MCP 配置已生成 | WorkBuddy 实际导入、常驻专家和连接器调用待验收；Coze Plugin/OpenAPI 未实现 |

@@ -4,7 +4,7 @@
 
 ## 开源与个人数据
 
-Trimate 的产品源码、Agent/Skill、数据库结构、合成测试和公开文档采用 [Apache-2.0 许可证](LICENSE)。部分 Skill 来自作者的[三途项目](https://github.com/haoqizhu1998/TriMate)，来源与原文校验见[迁移说明](docs/trimate-capability-migration.md)和[版权说明](NOTICE)。依赖项和外部设备服务各自适用其原有条款；本项目不隶属于 Garmin 或 COROS。
+Trimate 的产品源码、Agent/Skill、数据库结构、合成测试和公开文档采用 [Apache-2.0 许可证](LICENSE)。全部 Agent 与 Skill 均由 Trimate 项目直接维护；版权与商标边界见[版权说明](NOTICE)。依赖项和外部设备服务各自适用其原有条款；本项目不隶属于 Garmin 或 COROS。
 
 仓库和发布包不包含任何人的训练记录、身体数据、设备登录会话或 API 密钥。每位用户在自己的电脑上建立私有数据目录并连接自己的设备；上传源码或 ZIP 到 GitHub 不会同步用户数据。公开提 Issue 或贡献代码时请使用合成数据，参见 [贡献指南](CONTRIBUTING.md) 和 [安全说明](SECURITY.md)。
 
@@ -39,7 +39,7 @@ GPT/Codex、WorkBuddy、Coze 是平行的对话载体；佳明、高驰是平行
 
 能力入口与风险分级见 [ADR 0009](docs/adr/0009-host-neutral-capability-catalog.md)。Codex 桌面端可从 `get_capability_catalog` 和 `get_onboarding_status` 开始，不必先学习 CLI 命令。
 
-Trimate Agent 是项目常驻的产品对话入口。产品登记 17 个 Skill，其中 11 个直接保留三途原文并配有当前产品工具入口；仓库可构建 Codex 项目入口和通用 LLM 指令包；WorkBuddy 适配器保留在源码中，不是通用交付包的入口。跑姿视频分析需要本机额外安装视觉依赖和姿态模型。WorkBuddy 当前对话可读取通用包，跨对话常驻配置仍待客户端验收；Coze 适配和跨模型行为评测仍待实现。用法见 [Trimate Agent 与 Skill](docs/agent-skills.md)，设计决策见 [ADR 0012](docs/adr/0012-always-on-training-partner-entry.md)。
+Trimate Agent 是项目常驻的产品对话入口。产品登记 17 个 Skill，均配有当前产品工具入口；仓库可构建 Codex 项目入口和通用 LLM 指令包；WorkBuddy 适配器保留在源码中，不是通用交付包的入口。跑姿视频分析需要本机额外安装视觉依赖和姿态模型。WorkBuddy 当前对话可读取通用包，跨对话常驻配置仍待客户端验收；Coze 适配和跨模型行为评测仍待实现。用法见 [Trimate Agent 与 Skill](docs/agent-skills.md)，设计决策见 [ADR 0012](docs/adr/0012-always-on-training-partner-entry.md)。
 
 成长决策第一版可从对话中读取私有画像、预览并确认今天的训练方向、记录实际反馈；重复的个人反应只会产生候选适应，经用户确认后才改变低风险日的默认建议，不自动改写训练计划。边界见 [ADR 0011](docs/adr/0011-evidence-bound-growth-decisions.md)。
 
@@ -57,7 +57,7 @@ Garmin/设备先把数据上传到产品可访问的来源
 
 ## 安装与初始化
 
-面向朋友可从 [GitHub 预览发布页](https://github.com/haoqizhu1998/Trimate-Engine/releases/tag/V1.2.0)下载唯一的 `Trimate-V1.2.0.zip`，由 WorkBuddy 或支持附件的 GPT 对话识别入口并开始引导；本机数据连接与自动同步仍需宿主具备本机执行能力并由用户授权。包内的 Windows/Mac 安装文件及使用边界见 [普通用户交付](docs/workbuddy-consumer-install.md)。下面是源码开发安装步骤。
+面向朋友可从 [GitHub 预览发布页](https://github.com/haoqizhu1998/Trimate-Engine/releases/tag/V1.2.1)下载唯一的 `Trimate-V1.2.1.zip`，由 WorkBuddy 或支持附件的 GPT 对话识别入口并开始引导；本机数据连接与自动同步仍需宿主具备本机执行能力并由用户授权。包内的 Windows/Mac 安装文件及使用边界见 [普通用户交付](docs/workbuddy-consumer-install.md)。下面是源码开发安装步骤。
 
 要求 Python 3.12 或更高版本：
 

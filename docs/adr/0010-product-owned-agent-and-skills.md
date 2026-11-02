@@ -3,7 +3,7 @@
 - 状态：已接受
 - 日期：2026-10-27
 
-> **实现状态（2026-10-27）**：已有产品自有的版本化 Agent 入口、17 个登记 Skill（11 个三途原版且均有工具入口）、Codex 项目常驻入口与通用 LLM 包构建器，以及原文哈希和 MCP 工具契约检查。当前 Codex 对话能调用本地 MCP；跑姿视觉环境和模型仍需本机安装，跨模型真实对话行为评测和 WorkBuddy/Coze 安装适配尚未交付。常驻入口的修订见 [ADR 0012](0012-always-on-training-partner-entry.md)。
+> **实现状态（2026-10-27）**：已有产品自有的版本化 Agent 入口、17 个产品 Skill（均有工具入口）、Codex 项目常驻入口与通用 LLM 包构建器，以及 Skill 身份、版本和 MCP 工具契约检查。当前 Codex 对话能调用本地 MCP；跑姿视觉环境和模型仍需本机安装，跨模型真实对话行为评测和 WorkBuddy/Coze 安装适配尚未交付。常驻入口的修订见 [ADR 0012](0012-always-on-training-partner-entry.md)。
 
 ## 背景
 

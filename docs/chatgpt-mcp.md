@@ -10,7 +10,7 @@
 
 新增的 `analyze_session`、`get_sport_baseline` 和 `compare_plan_actual` 可做单次训练与指定课表的描述性复盘；`preview_race_segments` 和 `preview_fueling_logistics` 只核算用户提供的赛事与补给输入，不推断个人能力或验证赛事资料。
 
-三途周期总结可用 `get_periodic_training_summary` 查询，并用 `render_periodic_training_poster` 返回 PNG。手动训练记忆使用 `preview_training_memory` → 展示全部字段 → 用户确认 → `confirm_training_memory`；`list_training_memory` 可复查。跑姿视频先通过本机 `running-form-stage` 命令暂存，再在对话中用任务 ID 调用 `get_running_form_runtime`、`start_running_form_analysis`、`get_running_form_job`，必要时读取 `get_running_form_contact_sheet`；MCP 不接受任意文件路径。安装步骤见 [跑姿视频执行工具](running-form-tool.md)。
+周期总结可用 `get_periodic_training_summary` 查询，并用 `render_periodic_training_poster` 返回 PNG。手动训练记忆使用 `preview_training_memory` → 展示全部字段 → 用户确认 → `confirm_training_memory`；`list_training_memory` 可复查。跑姿视频先通过本机 `running-form-stage` 命令暂存，再在对话中用任务 ID 调用 `get_running_form_runtime`、`start_running_form_analysis`、`get_running_form_job`，必要时读取 `get_running_form_contact_sheet`；MCP 不接受任意文件路径。安装步骤见 [跑姿视频执行工具](running-form-tool.md)。
 
 ## 本机验证
 

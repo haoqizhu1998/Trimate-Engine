@@ -23,7 +23,7 @@ from athlete_growth.interfaces.host import running_form as running_form_host
 from athlete_growth.interfaces.mcp import server
 
 
-class TriMateExecutionMCPTests(unittest.TestCase):
+class TrimateExecutionMCPTests(unittest.TestCase):
     def _init(self, home: Path) -> None:
         with redirect_stdout(StringIO()):
             self.assertEqual(

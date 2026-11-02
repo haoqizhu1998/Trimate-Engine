@@ -1,4 +1,4 @@
-"""Comparable training-load windows adapted from TriMate's load-method separation."""
+"""Comparable training-load windows for Trimate."""
 
 from __future__ import annotations
 

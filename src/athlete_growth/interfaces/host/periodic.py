@@ -1,4 +1,4 @@
-"""Current-profile calendar summary and TriMate poster capabilities."""
+"""Current-profile calendar summary and Trimate poster capabilities."""
 
 from __future__ import annotations
 
