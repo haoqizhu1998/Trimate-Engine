@@ -113,10 +113,11 @@ def build_bundle(output: Path) -> Path:
     legacy_skill = codex / "athlete-training-partner"
     if legacy_skill.is_dir():
         shutil.rmtree(legacy_skill)
+    for target in (codex_experience, generic):
+        if target.exists():
+            shutil.rmtree(target)
     (codex_experience / "skills").mkdir(parents=True, exist_ok=True)
     (generic / "skills").mkdir(parents=True, exist_ok=True)
-    for target in (codex_experience, generic):
-        (target / "trimate-provenance.json").unlink(missing_ok=True)
     for name in ("host-contract.md",):
         shared = EXPERIENCE / name
         if shared.is_file():

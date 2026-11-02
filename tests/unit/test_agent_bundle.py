@@ -13,7 +13,7 @@ class AgentBundleTests(unittest.TestCase):
     def test_exported_bundle_uses_existing_tool_contract_and_is_portable(self) -> None:
         manifest = bundle.load_manifest()
         with tempfile.TemporaryDirectory() as tmp:
-            old = Path(tmp) / "out" / "generic" / "trimate-provenance.json"
+            old = Path(tmp) / "out" / "generic" / "stale.json"
             old.parent.mkdir(parents=True)
             old.write_text("{}", encoding="utf-8")
             output = bundle.build_bundle(Path(tmp) / "out")
