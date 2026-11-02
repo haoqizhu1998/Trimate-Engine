@@ -4,11 +4,11 @@ build-backend = "hatchling.build"
 
 [project]
 name = "athlete-growth"
-version = "0.1.0"
+version = "0.3.0"
 description = "Local-first personal training analysis and growth toolkit"
 readme = "README.md"
 requires-python = ">=3.12"
-license = { text = "Proprietary" }
+license = "Apache-2.0"
 authors = [{ name = "Mucci" }]
 dependencies = [
   "fitdecode>=0.11,<1",
@@ -20,13 +20,22 @@ dev = [
   "pyright>=1.1,<2",
   "ruff>=0.9,<1",
 ]
+running-form = [
+  "mediapipe>=0.10.31,<0.11; python_version < '3.13'",
+  "opencv-python-headless>=4.13,<6",
+  "Pillow>=10,<13",
+]
 
 [project.scripts]
 athlete-growth = "athlete_growth.interfaces.cli.main:main"
 athlete-growth-mcp = "athlete_growth.interfaces.mcp.server:main"
+athlete-growth-agent-bundle = "athlete_growth.experience.bundle:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/athlete_growth"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"experience" = "athlete_growth/experience/assets"
 
 [tool.pyright]
 pythonVersion = "3.12"
@@ -39,6 +48,10 @@ venv = ".venv"
 target-version = "py312"
 line-length = 100
 extend-exclude = ["data"]
+
+[tool.ruff.lint.per-file-ignores]
+"src/athlete_growth/adapters/posters/trimate_training_summary.py" = ["E501"]
+"src/athlete_growth/adapters/running_form/*.py" = ["E501"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]

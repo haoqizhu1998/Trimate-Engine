@@ -33,7 +33,7 @@ class TrainingAnalyticsTests(unittest.TestCase):
         self.assertEqual(first.metrics["sessions_7d"], 2)
         self.assertIsNone(first.metrics["hr_drift_pct"])
         self.assertIn("heart-rate drift", first.data_gaps)
-        self.assertEqual(first.algorithm_version, "training-analytics/1.0")
+        self.assertEqual(first.algorithm_version, "training-analytics/1.1")
 
     def test_builds_personal_recovery_baselines_without_treating_missing_as_zero(self) -> None:
         as_of = datetime(2026, 10, 26, 12, 0, tzinfo=UTC)
@@ -114,6 +114,53 @@ class TrainingAnalyticsTests(unittest.TestCase):
 
         self.assertEqual(result.metrics["sessions_7d"], 1)
         self.assertEqual(result.metrics["acute_load"], 11)
+
+    def test_device_and_session_rpe_are_not_summed_or_ratioed_together(self) -> None:
+        as_of = datetime(2026, 10, 26, 12, tzinfo=UTC)
+        records = [
+            CanonicalRecord.create(
+                athlete_id="a",
+                kind="activity",
+                occurred_at=as_of - timedelta(days=day),
+                data=data,
+            )
+            for day, data in (
+                (22, {"training_load": 70, "duration_min": 60}),
+                (15, {"training_load": 80, "duration_min": 60}),
+                (8, {"training_load": 90, "duration_min": 60}),
+                (1, {"duration_min": 40, "rpe": 5}),
+            )
+        ]
+        result = service.TrainingAnalytics().analyze(records, as_of=as_of)
+        self.assertEqual(result.load_method, "session_rpe")
+        self.assertEqual(result.metrics["acute_load"], 200)
+        self.assertIsNone(result.metrics["acute_chronic_ratio"])
+        self.assertIn("activity load scores use different", " ".join(result.data_gaps))
+
+    def test_duration_without_explicit_rpe_is_not_invented_load(self) -> None:
+        as_of = datetime(2026, 10, 26, 12, tzinfo=UTC)
+        activity = CanonicalRecord.create(
+            athlete_id="a", kind="activity", occurred_at=as_of,
+            data={"duration_min": 60, "avg_hr": 160},
+        )
+        result = service.TrainingAnalytics().analyze([activity], as_of=as_of)
+        self.assertIsNone(result.metrics["acute_load"])
+        self.assertIsNone(result.load_method)
+
+    def test_load_ratio_uses_prior_three_weeks_without_current_week(self) -> None:
+        as_of = datetime(2026, 10, 26, 12, tzinfo=UTC)
+        records = [
+            CanonicalRecord.create(
+                athlete_id="a", kind="activity",
+                occurred_at=as_of - timedelta(days=day),
+                data={"duration_min": 10, "rpe": 10},
+            )
+            for day in (22, 15, 8, 1, 2)
+        ]
+        result = service.TrainingAnalytics().analyze(records, as_of=as_of)
+        self.assertEqual(result.metrics["chronic_weekly_load"], 100)
+        self.assertEqual(result.metrics["acute_load"], 200)
+        self.assertEqual(result.metrics["acute_chronic_ratio"], 2)
 
 
 if __name__ == "__main__":

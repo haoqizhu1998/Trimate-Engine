@@ -9,9 +9,14 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from athlete_growth.adapters.coros import CorosConnector
 from athlete_growth.adapters.garmin_cn import GarminCnConnector
+from athlete_growth.adapters.garmin_cn.connector import (
+    activity_detail_coverage,
+    known_activity_summaries,
+)
 from athlete_growth.adapters.notifications import default_notification_sink
-from athlete_growth.adapters.scheduler import MacOSLaunchdScheduler
+from athlete_growth.adapters.scheduler import MacOSLaunchdScheduler, WindowsTaskScheduler
 from athlete_growth.adapters.storage import (
     ProfileRegistry,
     SQLiteAthleteProfileRepository,
@@ -28,6 +33,7 @@ from athlete_growth.application.automation import (
 )
 
 DEFAULT_SOURCE = "garmin-cn"
+SUPPORTED_SOURCES = frozenset({DEFAULT_SOURCE, "coros"})
 DEFAULT_INTERVAL_MINUTES = 30
 DEFAULT_LOOKBACK_DAYS = 3
 DEFAULT_NOTIFICATION_MODE = NotificationMode.ACTIONABLE_DIGEST
@@ -49,7 +55,7 @@ _SAFE_ERROR_CLASSES = frozenset(
 
 
 @dataclass(frozen=True, slots=True)
-class _HostRuntime:
+class HostRuntime:
     home: Path
     athlete_id: str
     layout: VaultLayout
@@ -58,7 +64,7 @@ class _HostRuntime:
     automation: SQLiteAutomationRepository
 
     @classmethod
-    def load(cls, data_home: str | Path) -> _HostRuntime:
+    def load(cls, data_home: str | Path) -> HostRuntime:
         home = Path(data_home).expanduser().resolve()
         athlete_id = ProfileRegistry(home / "config.toml").default_profile_id()
         if athlete_id is None:
@@ -93,7 +99,9 @@ def configure_automation(
 ) -> dict[str, object]:
     """Create or replace the current athlete's automatic sync policy."""
 
-    runtime = _HostRuntime.load(data_home)
+    runtime = HostRuntime.load(data_home)
+    if source not in SUPPORTED_SOURCES:
+        raise ValueError("unsupported automatic sync source")
     mode = (
         notification_mode
         if isinstance(notification_mode, NotificationMode)
@@ -123,7 +131,7 @@ def automation_status(
 ) -> dict[str, object]:
     """Return operational state without credentials, leases, paths, or raw payloads."""
 
-    runtime = _HostRuntime.load(data_home)
+    runtime = HostRuntime.load(data_home)
     checked_at = _aware(now or datetime.now(UTC), "now")
     policies: list[dict[str, object]] = []
     for subscription in runtime.automation.list_subscriptions(runtime.athlete_id):
@@ -156,6 +164,9 @@ def automation_status(
         "athlete_id": runtime.athlete_id,
         "checked_at": checked_at.isoformat(),
         "policies": policies,
+        "activity_detail_coverage": activity_detail_coverage(
+            runtime.records.list_current(runtime.athlete_id, kind="activity")
+        ),
         "backlog": {
             "due_subscriptions": len(due),
             "recoverable_runs": len(recoverable),
@@ -182,13 +193,19 @@ def run_automation_once(
 ) -> dict[str, object]:
     """Run one bounded deterministic sync/analyze/notify pass."""
 
-    runtime = _HostRuntime.load(data_home)
+    runtime = HostRuntime.load(data_home)
     active_clock = clock or (lambda: datetime.now(UTC))
+    garmin_connector = GarminCnConnector(home=runtime.home)
+    prime = getattr(garmin_connector, "set_known_activity_summaries", None)
+    if callable(prime):
+        prime(known_activity_summaries(
+            runtime.records.list_current(runtime.athlete_id, kind="activity")
+        ))
     loop = AutomaticTrainingLoop(
         automation_repository=runtime.automation,
         record_store=runtime.records,
         profile_repository=runtime.profiles,
-        connectors={DEFAULT_SOURCE: GarminCnConnector(home=runtime.home)},
+        connectors={DEFAULT_SOURCE: garmin_connector, "coros": CorosConnector(home=runtime.home)},
         raw_root=runtime.layout.raw,
         raw_directory_for_athlete=lambda athlete_id: (
             VaultLayout(
@@ -208,7 +225,7 @@ def list_notifications(
     *,
     include_read: bool = False,
 ) -> dict[str, object]:
-    runtime = _HostRuntime.load(data_home)
+    runtime = HostRuntime.load(data_home)
     notifications = runtime.automation.list_notifications(
         runtime.athlete_id,
         include_read=include_read,
@@ -222,7 +239,7 @@ def read_notification(
     *,
     now: datetime | None = None,
 ) -> dict[str, object]:
-    runtime = _HostRuntime.load(data_home)
+    runtime = HostRuntime.load(data_home)
     notification = runtime.automation.get_notification(notification_id)
     if notification is None or notification.athlete_id != runtime.athlete_id:
         raise KeyError("notification not found")
@@ -246,6 +263,20 @@ def uninstall_macos_automation(data_home: str | Path) -> dict[str, object]:
     return MacOSLaunchdScheduler(
         data_home=home,
         python_executable=Path(sys.executable),
+    ).uninstall()
+
+
+def install_windows_automation(data_home: str | Path) -> dict[str, object]:
+    home = Path(data_home).expanduser().resolve()
+    return WindowsTaskScheduler(
+        data_home=home, python_executable=Path(sys.executable)
+    ).install()
+
+
+def uninstall_windows_automation(data_home: str | Path) -> dict[str, object]:
+    home = Path(data_home).expanduser().resolve()
+    return WindowsTaskScheduler(
+        data_home=home, python_executable=Path(sys.executable)
     ).uninstall()
 
 

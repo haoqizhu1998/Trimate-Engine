@@ -36,7 +36,7 @@ class SafetyRulesTests(unittest.TestCase):
         self.assertTrue(any("professional" in action.lower() for action in assessment.actions))
         self.assertIn("not medical", assessment.disclaimer.lower())
 
-    def test_load_spike_escalates_even_when_subjective_scores_are_low(self) -> None:
+    def test_load_ratio_alone_does_not_classify_injury_risk(self) -> None:
         engine_type = getattr(rules, "SafetyRules", None)
         level_type = getattr(rules, "RiskLevel", None)
         self.assertIsNotNone(engine_type)
@@ -47,11 +47,10 @@ class SafetyRulesTests(unittest.TestCase):
             data={"pain": 0, "illness": False, "fatigue": 2, "soreness": 2},
         )
 
-        assessment = engine_type().assess(
-            check_in=check_in, observations=[], acute_load=300, chronic_load=150
-        )
+        assessment = engine_type().assess(check_in=check_in, observations=[])
 
-        self.assertEqual(assessment.level, level_type.HIGH)
+        self.assertEqual(assessment.level, level_type.LOW)
+        self.assertNotIn("load", " ".join(assessment.reasons).lower())
 
 
 if __name__ == "__main__":

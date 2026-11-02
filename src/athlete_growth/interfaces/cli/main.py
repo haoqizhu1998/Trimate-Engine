@@ -58,14 +58,34 @@ def _build_parser() -> argparse.ArgumentParser:
         help="private data vault (default: ATHLETE_GROWTH_HOME or ~/.athlete-growth)",
     )
 
+    mcp_reload = subcommands.add_parser(
+        "mcp-reload",
+        help="request a Codex app-server MCP refresh when its control socket is reachable",
+    )
+    mcp_reload.add_argument(
+        "--socket",
+        type=Path,
+        help="optional Codex app-server control socket; omitted uses the CLI daemon default",
+    )
+    mcp_reload.add_argument("--data-home", type=Path, default=_default_data_home())
+
     def add_home(command_parser: argparse.ArgumentParser) -> None:
         command_parser.add_argument("--data-home", type=Path, default=_default_data_home())
 
+    add_home(subcommands.add_parser(
+        "workbuddy-configure", help="add the local training data connector to WorkBuddy"
+    ))
+    add_home(subcommands.add_parser(
+        "workbuddy-unconfigure", help="remove only this product's WorkBuddy connector"
+    ))
+
     automation_configure = subcommands.add_parser(
         "automation-configure",
-        help="configure automatic Garmin China training updates",
+        help="configure automatic device-source training updates",
     )
-    automation_configure.add_argument("--source", default="garmin-cn")
+    automation_configure.add_argument(
+        "--source", choices=("garmin-cn", "coros"), default="garmin-cn"
+    )
     automation_configure.add_argument("--interval-minutes", type=int, default=30)
     automation_configure.add_argument("--lookback-days", type=int, default=3)
     automation_configure.add_argument(
@@ -112,6 +132,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="remove the private macOS launch agent",
     )
     add_home(automation_uninstall)
+    add_home(subcommands.add_parser(
+        "automation-install-windows", help="install the Windows per-user sync task"
+    ))
+    add_home(subcommands.add_parser(
+        "automation-uninstall-windows", help="remove the Windows per-user sync task"
+    ))
     notification_list = subcommands.add_parser(
         "notification-list",
         help="list local automation notifications",
@@ -128,10 +154,35 @@ def _build_parser() -> argparse.ArgumentParser:
     import_parser = subcommands.add_parser("import-file", help="import CSV/JSON/TCX/FIT")
     import_parser.add_argument("path", type=Path)
     add_home(import_parser)
+    running_stage = subcommands.add_parser(
+        "running-form-stage", help="stage a private running video for asynchronous analysis"
+    )
+    running_stage.add_argument("path", type=Path)
+    running_stage.add_argument("--note", default="")
+    add_home(running_stage)
+    running_model = subcommands.add_parser(
+        "running-form-install-model", help="install the official pose model in the private vault"
+    )
+    running_model.add_argument("--from-file", type=Path)
+    add_home(running_model)
+    running_setup = subcommands.add_parser(
+        "running-form-setup", help="install optional pose-analysis dependencies with Python 3.12"
+    )
+    add_home(running_setup)
+    running_status = subcommands.add_parser(
+        "running-form-runtime", help="check the local pose-analysis backend"
+    )
+    add_home(running_status)
 
-    sync_parser = subcommands.add_parser("sync", help="sync Garmin China read-only data")
-    sync_parser.add_argument("--start", type=date.fromisoformat, required=True)
-    sync_parser.add_argument("--end", type=date.fromisoformat, required=True)
+    sync_parser = subcommands.add_parser("sync", help="sync a read-only device source")
+    sync_parser.add_argument("--source", choices=("garmin-cn", "coros"), default="garmin-cn")
+    sync_parser.add_argument("--start", type=date.fromisoformat)
+    sync_parser.add_argument("--end", type=date.fromisoformat)
+    sync_parser.add_argument(
+        "--backfill-existing",
+        action="store_true",
+        help="fill missing detail for activities already in the local Garmin archive",
+    )
     sync_parser.add_argument(
         "--chunk-days",
         type=int,
@@ -149,6 +200,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "garmin-cn-revoke", help="remove Garmin China credentials"
     )
     add_home(revoke_parser)
+    for action in ("helper-install", "login-start", "login-finish", "login-status", "revoke"):
+        coros_parser = subcommands.add_parser(
+            f"coros-{action}", help=f"run local COROS OAuth {action} via the official helper"
+        )
+        add_home(coros_parser)
 
     check_in = subcommands.add_parser("check-in", help="record subjective readiness")
     check_in.add_argument("--at", type=datetime.fromisoformat, required=True)
@@ -274,7 +330,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command != "init":
         try:
             result = commands.execute(args)
-        except (KeyError, ValueError, RuntimeError, FileNotFoundError) as exc:
+        except (KeyError, ValueError, RuntimeError, OSError) as exc:
             print(f"Error: {exc}", file=sys.stderr)
             return 1
         print(json.dumps(result, ensure_ascii=False, default=_json_default))

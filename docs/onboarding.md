@@ -2,9 +2,9 @@
 
 ## 当前产品形态
 
-理想体验是用户在熟悉的模型宿主里说“帮我连接训练数据并开启自动分析”，宿主逐步解释、调用本地引擎并展示结果。当前仓库已有 JSON-safe Python facade、完整 CLI 和只读 stdio MCP 服务；ChatGPT 网页插件与私有隧道、WorkBuddy、Coze 及 HTTP/OpenAPI 仍未接通。
+理想体验是用户在熟悉的模型宿主里说“帮我连接训练数据并开启自动分析”，宿主逐步解释、调用本地引擎并展示结果。当前仓库已有版本化能力目录、宿主无关 Python facade、CLI 和覆盖主要本地能力的 stdio MCP；当前项目的 Codex 原生连接已验证。ChatGPT 网页插件与私有隧道、WorkBuddy、Coze 及 HTTP/OpenAPI 仍未接通。
 
-因此当前可用方式是：本地支持 stdio MCP 的宿主可调用只读报告工具；尚未安装插件的 GPT/Codex 仍可作为对话和指导入口，在本机终端执行明确命令。开始前先按 README 安装并运行 `. .venv/bin/activate`；每个新终端都要重新激活。宿主不应索取或保存 Garmin 密码、MFA、Token、SQLite 路径或原始健康数据。未来 WorkBuddy 和 Coze 适配器也必须复用同一核心，不能各自实现训练规则。
+因此当前可用方式是：本地支持 stdio MCP 的宿主可先调用 `get_capability_catalog`、`get_onboarding_status`，再调用报告、计划与其他适合对话的工具；未连接本地 MCP 的宿主仍可作为对话和指导入口，在本机终端执行明确命令。开始前先按 README 安装并运行 `. .venv/bin/activate`；每个新终端都要重新激活。宿主不应索取或保存 Garmin 密码、MFA、Token、SQLite 路径或原始健康数据。未来 WorkBuddy 和 Coze 适配器也必须复用同一核心，不能各自实现训练规则。
 
 ## 用户只需要理解的闭环
 
@@ -132,11 +132,11 @@ athlete-growth notification-read NOTIFICATION_ID
 
 ### GPT / Codex
 
-已有只读 stdio MCP 适配器，可由支持本地 MCP 的宿主启动；ChatGPT 网页端仍需用户账号侧插件和私有 Tunnel 配置。当前不能把“本地 MCP 已实现”写成“GPT 插件已安装”。具体见 [GPT 对话接入](chatgpt-mcp.md)。
+已有本地 stdio MCP 适配器，覆盖阶段 0–5 适合对话的核心能力；当前项目的 Codex 已原生连接。ChatGPT 网页端仍需用户账号侧插件和私有 Tunnel 配置。当前不能把“本地 MCP 已实现”写成“GPT 插件已安装”，也不能把两步确认误称为独立真人授权。具体见 [GPT 对话接入](chatgpt-mcp.md)。
 
 ### WorkBuddy
 
-未来 MCP、Skill 和 Workflow 只负责编排引导、展示状态和调用 facade。它们不得复制分析算法，也不得保存 Garmin Token。
+WorkBuddy 本地上传 Skill 包含Trimate Agent 定义与 17 个场景方法；另有专家定义包保留 Agent、Skill 和本地 MCP 依赖。个人用户可在 WorkBuddy 从本地 ZIP 上传 Skill，不需要开放平台入驻。Mac 安装包已生成并做隔离目录安装烟测；本地 ZIP 的客户端导入、常驻专家配置和数据工具调用仍需验收。具体见 [WorkBuddy 普通用户交付](workbuddy-consumer-install.md) 和 [ADR 0010](adr/0010-product-owned-agent-and-skills.md)。
 
 ### Coze
 

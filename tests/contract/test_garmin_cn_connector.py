@@ -372,9 +372,7 @@ class GarminCnSessionGatewayTests(unittest.TestCase):
 
             activity = next(record for record in batch.records if record.kind == "activity")
             self.assertEqual(activity.payload["activityName"], "Easy Run")
-            self.assertEqual(
-                activity.canonical_payload,
-                {
+            expected = {
                     "calendar_date": "2026-10-26",
                     "name": "Easy Run",
                     "sport": "running",
@@ -389,7 +387,13 @@ class GarminCnSessionGatewayTests(unittest.TestCase):
                     "calories": 360.0,
                     "steps": 5200,
                     "device_id": 12345,
-                },
+                }
+            for key, value in expected.items():
+                self.assertEqual(activity.canonical_payload[key], value)
+            self.assertEqual(activity.canonical_payload["detail_status"], "partial")
+            self.assertIn(
+                "original_fit_zip",
+                activity.canonical_payload["detail_missing_sections"],
             )
 
     def test_normalizes_nested_recovery_metrics(self) -> None:

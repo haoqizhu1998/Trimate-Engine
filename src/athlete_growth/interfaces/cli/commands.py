@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import getpass
+import sys
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -11,8 +12,18 @@ from pathlib import Path
 from typing import Any, cast
 from uuid import uuid4
 
+from athlete_growth.adapters.coros import (
+    CorosConnector,
+    CorosHelperGateway,
+    install_official_helper,
+)
 from athlete_growth.adapters.files import FileDataSource
 from athlete_growth.adapters.garmin_cn import GarminCnConnector
+from athlete_growth.adapters.garmin_cn.connector import (
+    CN_TIMEZONE,
+    activity_detail_coverage,
+    known_activity_summaries,
+)
 from athlete_growth.adapters.races import RaceFileConnector
 from athlete_growth.adapters.storage import (
     ProfileRegistry,
@@ -20,6 +31,7 @@ from athlete_growth.adapters.storage import (
     SQLiteRecordStore,
     VaultLayout,
 )
+from athlete_growth.adapters.workbuddy_config import configure_workbuddy, unconfigure_workbuddy
 from athlete_growth.application.ai import ModelConsent, ModelRouter, RoutingPolicy
 from athlete_growth.application.check_in import CheckInService
 from athlete_growth.application.data_quality import inspect_records
@@ -35,7 +47,9 @@ from athlete_growth.domain.nutrition import FuelingContext, NutritionProfile
 from athlete_growth.domain.records import CanonicalRecord, JsonValue
 from athlete_growth.domain.recovery import InjuryStatus
 from athlete_growth.domain.training import TrainingConstraints
+from athlete_growth.interfaces.host import running_form as running_form_host
 from athlete_growth.interfaces.host import tools as host_tools
+from athlete_growth.interfaces.host.codex_mcp_reload import reload_codex_mcp
 from athlete_growth.ports.data_source import SyncWindow
 from athlete_growth.ports.model_provider import ModelRequest
 
@@ -71,6 +85,20 @@ class Runtime:
 
 def execute(args) -> dict[str, object]:
     home = args.data_home.expanduser().resolve()
+    if args.command == "workbuddy-configure":
+        return configure_workbuddy(python_executable=Path(sys.executable), data_home=home)
+    if args.command == "workbuddy-unconfigure":
+        return unconfigure_workbuddy()
+    if args.command == "mcp-reload":
+        return reload_codex_mcp(socket_path=args.socket)
+    if args.command == "running-form-stage":
+        return running_form_host.stage_video(home, args.path, note=args.note)
+    if args.command == "running-form-install-model":
+        return running_form_host.install_model(home, args.from_file)
+    if args.command == "running-form-setup":
+        return running_form_host.setup_backend(home)
+    if args.command == "running-form-runtime":
+        return running_form_host.runtime_status(home)
     if args.command == "restore":
         restored = DataRightsService(home).restore_profile(
             args.archive, args.target_home.expanduser().resolve()
@@ -95,6 +123,10 @@ def execute(args) -> dict[str, object]:
         return host_tools.automation_install_macos(home)
     if args.command == "automation-uninstall-macos":
         return host_tools.automation_uninstall_macos(home)
+    if args.command == "automation-install-windows":
+        return host_tools.install_windows_automation(home)
+    if args.command == "automation-uninstall-windows":
+        return host_tools.uninstall_windows_automation(home)
     if args.command == "notification-list":
         return host_tools.notification_list(home, include_read=args.include_read)
     if args.command == "notification-read":
@@ -110,20 +142,74 @@ def execute(args) -> dict[str, object]:
         return asdict(result)
     if args.command == "sync":
         if not 1 <= args.chunk_days <= 28:
-            raise ValueError("Garmin China chunk days must be between 1 and 28")
+            raise ValueError("chunk days must be between 1 and 28")
+        if args.source == "coros":
+            if args.backfill_existing:
+                raise ValueError("COROS detail backfill uses an explicit date range")
+            if args.start is None or args.end is None:
+                raise ValueError("COROS sync requires --start and --end")
+            result = IngestionService(
+                athlete_id=runtime.athlete_id,
+                store=runtime.store,
+                raw_dir=runtime.layout.raw,
+                timezone_name=runtime.timezone_name,
+            ).sync_chunked(
+                CorosConnector(home=home),
+                SyncWindow(args.start, args.end),
+                chunk_days=args.chunk_days,
+            )
+            return {"source": "coros", "start": args.start.isoformat(),
+                    "end": args.end.isoformat(), **asdict(result)}
+        activity_records = runtime.store.list_current(runtime.athlete_id, kind="activity")
+        if args.backfill_existing:
+            if args.start is not None or args.end is not None:
+                raise ValueError("--backfill-existing cannot be combined with dates")
+            pending = [
+                record for record in activity_records
+                if record.data.get("detail_status") != "complete"
+                and any(item.source == "garmin-cn" for item in record.evidence)
+            ]
+            if not pending:
+                return {
+                    "source": "garmin-cn",
+                    "chunks": 0,
+                    "inserted": 0,
+                    "updated": 0,
+                    "activity_detail_coverage": activity_detail_coverage(activity_records),
+                }
+            dates = [_garmin_activity_date(record) for record in pending]
+            start, end = min(dates), max(dates)
+        else:
+            if args.start is None or args.end is None:
+                raise ValueError("sync requires --start and --end, or --backfill-existing")
+            start, end = args.start, args.end
         connector = GarminCnConnector(home=home)
+        prime = getattr(connector, "set_known_activity_summaries", None)
+        if callable(prime):
+            prime(known_activity_summaries(
+                activity_records
+            ))
         result = IngestionService(
             athlete_id=runtime.athlete_id,
             store=runtime.store,
             raw_dir=runtime.layout.raw,
         ).sync_chunked(
             connector,
-            SyncWindow(args.start, args.end),
+            SyncWindow(start, end),
             chunk_days=args.chunk_days,
         )
-        day_count = (args.end - args.start).days + 1
+        day_count = (end - start).days + 1
         chunk_count = (day_count + args.chunk_days - 1) // args.chunk_days
-        return {"source": "garmin-cn", "chunks": chunk_count, **asdict(result)}
+        return {
+            "source": "garmin-cn",
+            "chunks": chunk_count,
+            "start": start.isoformat(),
+            "end": end.isoformat(),
+            "activity_detail_coverage": activity_detail_coverage(
+                runtime.store.list_current(runtime.athlete_id, kind="activity")
+            ),
+            **asdict(result),
+        }
     if args.command == "garmin-cn-login":
         email = (args.email or input("Garmin China email: ")).strip()
         if not email:
@@ -142,6 +228,17 @@ def execute(args) -> dict[str, object]:
     if args.command == "garmin-cn-revoke":
         GarminCnConnector(home=home).revoke()
         return {"revoked": True, "region": "cn"}
+    if args.command.startswith("coros-"):
+        action = args.command.removeprefix("coros-")
+        gateway = CorosHelperGateway(home=home)
+        if action == "helper-install":
+            install_official_helper(home)
+            return {"source": "coros", "helper_installed": True}
+        if action == "revoke":
+            CorosConnector(home=home).revoke()
+            return {"revoked": True, "source": "coros"}
+        if action in {"login-start", "login-finish", "login-status"}:
+            return {"source": "coros", "result": gateway.command(action)}
     if args.command == "check-in":
         record = CheckInService(runtime.athlete_id, runtime.store).record(
             occurred_at=args.at,
@@ -368,6 +465,16 @@ def _load_goals(runtime: Runtime) -> list[Goal]:
             )
         )
     return goals
+
+
+def _garmin_activity_date(record: CanonicalRecord) -> date:
+    calendar_date = record.data.get("calendar_date")
+    if isinstance(calendar_date, str):
+        try:
+            return date.fromisoformat(calendar_date)
+        except ValueError:
+            pass
+    return record.occurred_at.astimezone(CN_TIMEZONE).date()
 
 
 def _weekday_minutes(value: str) -> dict[int, int]:

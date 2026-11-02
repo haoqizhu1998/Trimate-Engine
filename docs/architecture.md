@@ -1,37 +1,45 @@
 # 产品技术架构
 
+白板风格详图见[AI Trimate架构流程图](training-partner-whiteboard.md)；跨领域复用版本见[可复用的 Agent 产品架构蓝图](reusable-agent-product-architecture.md)。
+
 ## 1. 当前架构结论
 
-当前产品是本地优先的 Python 模块化单体。领域规则与确定性分析不依赖 Garmin、AI Provider、SQLite 或模型宿主；端口和适配器负责连接这些外部能力。
+当前产品是本地优先的 Python 模块化单体。领域规则与确定性分析不依赖 Garmin、AI Provider、SQLite 或模型宿主；端口和适配器负责连接这些外部能力。Trimate Agent 是项目常驻的产品对话入口，产品 Skill 是按需调用的训练方法；它们是产品自有、可版本化的资产，面向不同模型宿主交付。用户数据、目标和计划等业务状态仍由产品内核及私有库管理。
+
+GPT/Codex、WorkBuddy、Coze 是平行的对话载体，负责承载Trimate并调用同一产品能力契约。佳明、高驰是平行的设备数据来源，归产品的数据连接层管理。载体不拥有设备连接规则，也不保存设备账号凭据；来源适配器负责各设备的授权、拉取和标准化。佳明中国区已接入本机私有库和自动轮询；高驰增加了独立于载体的试验性本机轮询适配器，真实账号返回格式与授权链路尚需验收。详见[设备连接能力](device-connections.md)。
+
+训练喜好作为用户私有状态保存：结构化偏好先预览再确认，保留历史版本，并在成长画像中展示；新计划只在本次输入未覆盖时读取已确认偏好。Skill 描述询问和使用偏好的方法，不保存个人喜好。自由文本偏好笔记不会自动驱动排课。详见 [ADR 0013](adr/0013-private-training-preferences.md)。
 
 已经落地的自动路径是：Garmin 中国区本地会话只读轮询 → 原始证据与标准记录 → 真实变化集 → 确定性日报/周报及安全规则 → 本地 Inbox → macOS Notification Center。macOS `launchd` 可在用户登录会话中周期性唤起一次有界 Worker。
 
-已落地只读 stdio MCP 传输。尚未落地的路径包括官方 Garmin 商业 Push/OAuth、ChatGPT 网页插件与 Tunnel 端到端接入、WorkBuddy/Coze 适配、HTTP/OpenAPI、邮件/移动端通知、Windows/Linux 服务安装器以及托管多用户 Worker。图中虚线均表示这些未来适配器。
+已落地本地 stdio MCP 传输和版本化能力目录。适合对话调用的阶段 0–5 能力现在按只读、纯计算预览、受确认保护的写入及本机管理四类映射；MCP 覆盖档案/引导、数据质量、活动、报告、目标/计划、Check-in、恢复、补给、赛事、成长决策和通知。目标计划支持多周重点轮换预测与逐周七天计划预览；尚未落地的路径包括完整目标可行性评估与自动渐进的专项周期处方、独立真人确认通道、官方 Garmin 商业 Push/OAuth、ChatGPT 网页插件与 Tunnel 端到端接入、WorkBuddy/Coze 适配、HTTP/OpenAPI、邮件/移动端通知、Windows/Linux 服务安装器以及托管多用户 Worker。图中虚线均表示这些未来适配器。
 
 ## 2. 系统关系
 
 ```mermaid
 flowchart LR
-    Device[Garmin / 设备] --> Source[可访问的数据来源]
-    Source -->|Garmin CN poll| Worker[本地有界 Worker]
-    Files[CSV / JSON / TCX / FIT] -->|手动导入| Ingest[采集与标准化]
-    Worker --> Connector[只读连接器]
-    Connector --> Ingest
-    Ingest --> Raw[(私有 Raw Vault)]
-    Ingest --> Canonical[(SQLite Canonical)]
-    Canonical -->|实际变化| Changes[DataChangeSet]
-    Changes --> Analysis[确定性日报 / 周报 / 安全规则]
-    Analysis --> Snapshot[AnalysisSnapshot]
-    Snapshot --> Policy{通知策略}
-    Policy --> Inbox[(本地 Inbox / Outbox)]
-    Inbox --> Mac[macOS 系统通知]
-    CLI[CLI] --> Facade[宿主无关 JSON facade]
-    Facade --> Worker
-    Facade --> Inbox
-    Launchd[macOS launchd] --> Worker
-    Facade -. 未来 MCP / OpenAPI .-> Hosts[GPT / WorkBuddy / Coze]
-    Inbox -. 未来适配器 .-> FutureDelivery[邮件 / 移动端 / 宿主通知]
-    Push[官方商业 Push] -. 未来来源适配器 .-> Worker
+    User[用户] --> Hosts[GPT / Codex / WorkBuddy / Coze<br/>对话载体]
+    Hosts --> Agent[产品Trimate Agent<br/>按需组合 Skill]
+    Agent --> Interface[产品能力入口<br/>本地 MCP / 未来 HTTP]
+    CLI[CLI / 未来 Web App] --> Interface
+    Interface --> Facade[版本化能力契约与应用用例]
+    Facade --> Planning[目标 / 计划 / 分析 / 决策]
+    Planning <--> Canonical[(用户私有标准库)]
+
+    Garmin[佳明中国区] --> GarminAdapter[佳明来源适配器<br/>已实现本机轮询]
+    Coros[高驰官方 MCP] -.-> CorosAdapter[高驰来源适配器<br/>待实现自动入库]
+    Files[CSV / JSON / TCX / FIT] --> FileAdapter[文件来源适配器]
+    GarminAdapter --> Ingest[采集 / 标准化 / 去重]
+    CorosAdapter -.-> Ingest
+    FileAdapter --> Ingest
+    Worker[本机调度器] --> GarminAdapter
+    Worker -.-> CorosAdapter
+    Ingest --> Raw[(私有原始证据)]
+    Ingest --> Canonical
+    Canonical -->|真实变化| Analysis[确定性分析与安全规则]
+    Analysis --> Inbox[(本地通知 Inbox)]
+    Inbox --> User
+    Hosts -. 当前可选在线查询 .-> Coros
 ```
 
 设备上传到 Garmin Connect 和本地产品读取是两个步骤；产品的同步时效从数据已经进入可访问来源后开始计算。本地 Worker 只在 Mac 开机、用户已登录且进程能访问网络时工作，恢复后按策略回看窗口补拉。
@@ -48,12 +56,20 @@ adapters        ┘         │             ▲
 - `domain/`：运动员、标准记录、目标、训练、恢复、营养、赛事、分析和安全规则；不导入基础设施。
 - `application/`：采集、报告、计划、恢复、营养、赛事、AI 路由和自动闭环用例。
 - `ports/`：数据源、Repository、通知、模型 Provider 与受确认保护的训练写回契约。
-- `adapters/`：Garmin 中国区、文件、SQLite、原始保险库、AI Provider、macOS 通知和 `launchd`。
+- `adapters/`：当前包含 Garmin 中国区、文件、SQLite、原始保险库、AI Provider、macOS 通知和 `launchd`；高驰自动入库适配器待实现。
 - `interfaces/cli/`：当前用户和运维入口。
-- `interfaces/host/`：返回 JSON 安全结果的宿主无关函数 facade；当前自动化 CLI 复用它。它不是已经完成的 MCP、HTTP 或某个模型宿主插件。
-- `interfaces/mcp/`：把现有应用层只读命令暴露为本地 stdio MCP；不包含凭据或远程身份管理。
+- `interfaces/host/`：版本化能力目录和宿主无关 facade，组合已实现应用用例并返回有界、JSON 安全的结果；自动化 CLI 也复用其中部分函数。
+- `interfaces/mcp/`：本地 stdio 传输、工具输入契约和安全分级；只接受允许的字段，不接受数据目录、任意文件路径或凭据，不含远程身份管理。
 
-未来 GPT、WorkBuddy 和 Coze 适配器必须调用同一个 facade/应用用例，不复制训练算法、安全规则或持久化状态。
+GPT/Codex、WorkBuddy 和 Coze 适配器应调用同一个 facade/应用用例，不复制训练算法、安全规则、设备连接逻辑或持久化状态。高驰官方 MCP 的宿主直接连接仅是当前在线查询路径，不构成产品私有库同步；未来高驰来源适配器应与佳明适配器同层，供所有载体使用。
+
+目标使用形态中，用户始终从Trimate Agent 发起请求。Agent 先识别意图，再按需组合产品 Skill；Skill 规定训练场景的方法、追问、工具编排、证据解释、缺口处理与输出验收。宿主适配将常驻 Agent 与场景方法转换为各平台支持的指令、Skill、Workflow 或 UI。Agent/Skill 与版本化工具契约共同构成产品对话能力，不以某个宿主的 Prompt 为唯一源码。目标共创、计划预览、用户确认、版本保存与复盘属于应用用例，领域层负责可行性和安全约束，个人资料与计划状态保存在用户私有库中。未来 Web/App 可复用应用用例，不依赖对话宿主。具体决策见 [ADR 0012](adr/0012-always-on-training-partner-entry.md)。
+
+Agent/Skill 产品资产应有稳定 ID、版本、适用场景、所需能力、输入缺口、输出要求与评测样例；宿主包声明所支持的版本和工具映射。模型负责理解与表达，工具负责读取真实状态和执行用例，领域规则负责确定性判断。宿主不支持原生 Skill 时，可用其 Agent 配置、工具描述或 Workflow 承载同一产品定义，但必须经过该宿主的工具调用和行为验收。任何模型都不能仅凭加载 Prompt 获得本地数据访问或写入权限。
+
+MCP 工具现统一经宿主无关 facade 调用应用用例，不再通过 CLI 参数解析器分发。目标/计划草案与确认使用 Repository 端口和 SQLite 适配器，`TrainingPlanner.save` 已改为 Repository 端口类型。旧 CLI `plan-create` 仍直接生成并保存，是本机管理/兼容路径，不是 MCP 的计划确认流程。各工具的输出字段仍随能力而异；ADR 0007 所述统一结果 envelope 尚未落地。
+
+成长决策由 `application/learn/decision.py` 根据当天报告构建可选训练方向；`adapters/storage/sqlite_growth.py` 保存用户私有的确认决策、可修订结果反馈和可撤回适应。Agent/Skill 负责呈现与追问，应用层负责证据绑定、样本门槛和版本，安全规则始终拥有覆盖权。该适应目前只影响低风险日的默认推荐，不自动修改已确认计划。见 [ADR 0011](adr/0011-evidence-bound-growth-decisions.md)。
 
 ## 4. 自动闭环的持久化实体
 
@@ -120,17 +136,17 @@ adapters        ┘         │             ▲
 
 | 边界 | 当前实现 | 待实现 |
 |---|---|---|
-| 数据来源 | Garmin CN 本地认证会话只读 Poll；CSV/JSON/TCX/FIT 文件 | 官方 Garmin 商业 OAuth/Push、更多设备 |
+| 数据来源 | Garmin CN 本地认证会话只读 Poll；CSV/JSON/TCX/FIT 文件；高驰官方 MCP 可供用户在线查询但未自动入库 | 高驰产品级自动入库、官方 Garmin 商业 OAuth/Push、更多设备 |
 | 调度 | macOS 用户级 `launchd` | Windows Task Scheduler、Linux systemd、容器/托管调度 |
 | 通知 | 本地 Inbox、macOS Notification Center | 邮件、移动推送、GPT/WorkBuddy/Coze 主动通知 |
-| 用户入口 | CLI、宿主无关 Python facade | MCP、Plugin、HTTP/OpenAPI、Web/App |
+| 交互与接入 | CLI、版本化能力目录、宿主无关 Python facade、本地 stdio MCP、产品自有 Agent/Skill 源定义与 Codex/通用包构建器 | 跨宿主行为评测、WorkBuddy/Coze 安装适配、统一结果 envelope、HTTP/OpenAPI、Web/App |
 | AI | Provider 端口与显式、可降级解释 | 托管模型编排与宿主级授权体验 |
 
 Garmin 中国区适配器使用本地缓存会话和非官方 Garmin Connect 接口，不是官方商业集成。它声明 `read_only=True`、`supports_write=False` 和 `delivery_mode="poll"`。
 
 ## 10. 数据与研发边界
 
-产品仓包含可构建的源码、SQLite Schema、迁移逻辑、合成 Fixture、测试和公开技术文档。这些资产可以独立构建和验证；当前项目许可证仍是 `Proprietary`，因此不能把“可开源边界”误写为已经开源。
+产品仓当前包含可构建的源码、SQLite Schema、迁移逻辑、合成 Fixture、测试、产品自有 Agent/Skill 定义和公开技术文档；跨模型真实对话行为评测仍待补充。已有资产可以独立构建和验证，源码采用 Apache-2.0 许可证；GitHub 发布与正式发行另行验收。Agent/Skill 中只存通用方法，不存个人资料、真实训练记录、Token 或模型密钥。
 
 真实运行数据位于被 Git 忽略的保险库中：
 

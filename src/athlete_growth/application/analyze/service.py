@@ -5,12 +5,13 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from statistics import mean
 
+from athlete_growth.application.analyze.load import comparable_load_window
 from athlete_growth.domain.analytics import AnalysisResult
 from athlete_growth.domain.records import CanonicalRecord
 
 
 class TrainingAnalytics:
-    algorithm_version = "training-analytics/1.0"
+    algorithm_version = "training-analytics/1.1"
 
     def analyze(
         self,
@@ -32,17 +33,7 @@ class TrainingAnalytics:
         ]
         activities = [record for record in window_records if record.kind == "activity"]
         acute = [record for record in activities if record.occurred_at >= acute_boundary]
-        acute_load = sum(self._load(record) for record in acute)
-        chronic_total = sum(self._load(record) for record in activities)
-        has_baseline_span = bool(activities) and min(
-            record.occurred_at for record in activities
-        ) <= as_of - timedelta(days=14)
-        chronic_weekly = chronic_total / 4.0 if has_baseline_span else None
-        ratio = (
-            acute_load / chronic_weekly
-            if chronic_weekly is not None and chronic_weekly > 0
-            else None
-        )
+        load = comparable_load_window(activities, as_of=as_of, acute_start=acute_boundary)
         duration = sum(self._number(record.data.get("duration_min")) for record in acute)
         high_minutes = sum(
             min(
@@ -85,9 +76,9 @@ class TrainingAnalytics:
             is not None
         ]
         metrics: dict[str, float | int | None] = {
-            "acute_load": round(acute_load, 2),
-            "chronic_weekly_load": round(chronic_weekly, 2) if chronic_weekly is not None else None,
-            "acute_chronic_ratio": round(ratio, 3) if ratio is not None else None,
+            "acute_load": load.acute,
+            "chronic_weekly_load": load.chronic_weekly,
+            "acute_chronic_ratio": load.ratio,
             "sessions_7d": len(acute),
             "duration_min_7d": round(duration, 2),
             "high_intensity_pct": round(high_minutes / duration * 100, 2) if duration > 0 else None,
@@ -99,13 +90,13 @@ class TrainingAnalytics:
             "body_battery_baseline_28d": round(mean(body_battery), 2) if body_battery else None,
             "weight_kg_latest": round(max(weight_values)[1], 2) if weight_values else None,
         }
-        gaps: list[str] = []
+        gaps: list[str] = list(load.gaps)
         if not activities:
             gaps.append("training activities")
         if not drift_values:
             gaps.append("heart-rate drift")
-        if chronic_weekly is None:
-            gaps.append("28-day load baseline")
+        if load.chronic_weekly is None:
+            gaps.append("prior three-week load baseline")
         for values, label in (
             (resting_hr, "resting heart rate baseline"),
             (hrv, "HRV baseline"),
@@ -125,27 +116,22 @@ class TrainingAnalytics:
         if not evidence:
             evidence = tuple(record.record_id for record in window_records)
         confidence = max(0.0, min(1.0, 0.35 + len(window_records) / 28.0))
+        if activities and load.comparable_count < len(activities):
+            confidence = min(confidence, 0.5)
         return AnalysisResult(
             metrics,
             evidence,
             tuple(gaps),
             round(confidence, 2),
             self.algorithm_version,
+            load.method,
+            load.comparable_count,
         )
 
     @staticmethod
     def _require_aware(value: datetime, field_name: str) -> None:
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError(f"{field_name} must be timezone-aware")
-
-    @staticmethod
-    def _load(record: CanonicalRecord) -> float:
-        direct = TrainingAnalytics._optional_number(record.data.get("training_load"))
-        if direct is not None:
-            return direct
-        duration = TrainingAnalytics._number(record.data.get("duration_min"))
-        rpe = TrainingAnalytics._optional_number(record.data.get("rpe"))
-        return duration * rpe if rpe is not None else 0.0
 
     @staticmethod
     def _number(value: object) -> float:

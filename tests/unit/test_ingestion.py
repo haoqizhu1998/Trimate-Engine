@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import hashlib
+import io
 import unittest
+import zipfile
 from datetime import UTC, date, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -8,6 +11,8 @@ from tempfile import TemporaryDirectory
 from athlete_growth.adapters.garmin_cn.connector import (
     GarminCnConnector,
     GarminCnSessionGateway,
+    activity_detail_coverage,
+    known_activity_summaries,
 )
 from athlete_growth.adapters.storage import SQLiteRecordStore
 from athlete_growth.application.ingest import service
@@ -15,6 +20,161 @@ from athlete_growth.ports import data_source
 
 
 class IngestionTests(unittest.TestCase):
+    def test_garmin_activity_details_and_original_file_are_private_and_idempotent(self) -> None:
+        source = {
+            "activityId": 42,
+            "activityName": "Morning Run",
+            "activityType": {"typeKey": "running"},
+            "startTimeGMT": "2026-10-25 23:30:00",
+            "startTimeLocal": "2026-10-26 07:30:00",
+            "duration": 1800.0,
+            "distance": 5000.0,
+        }
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            archive.writestr("activity.fit", b"fit-recording")
+        original = buffer.getvalue()
+
+        class FakeClient:
+            detail_calls = 0
+
+            def login(self, tokenstore: str) -> tuple[object, object]:
+                return object(), object()
+
+            def get_activities_by_date(
+                self, startdate: str, enddate: str
+            ) -> list[dict[str, object]]:
+                return [source]
+
+            def get_activity(self, activity_id: str) -> dict[str, object]:
+                self.detail_calls += 1
+                return {**source, "averageHR": 145}
+
+            def get_activity_details(self, activity_id: str) -> dict[str, object]:
+                return {"activityDetailMetrics": [{"metrics": [145]}]}
+
+            def get_activity_laps(self, activity_id: str) -> dict[str, object]:
+                return {"lapDTOs": [
+                    {"duration": 900.0, "distance": 2500.0, "averageHR": 140},
+                    {"duration": 900.0, "distance": 2500.0, "averageHR": 150},
+                ]}
+
+            def download_activity(self, activity_id: str, dl_fmt: object) -> bytes:
+                return original
+
+            def __getattr__(self, name: str):
+                return lambda *args: []
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            client = FakeClient()
+            gateway = GarminCnSessionGateway(
+                token_dir=root / "tokens", client_factory=lambda **kwargs: client
+            )
+            connector = GarminCnConnector(home=root, gateway=gateway)
+            batch = connector.sync(
+                data_source.SyncWindow(date(2026, 10, 26), date(2026, 10, 26)), None
+            )
+            activity = next(record for record in batch.records if record.kind == "activity")
+            self.assertEqual(activity.canonical_payload["detail_status"], "complete")
+            self.assertEqual(activity.canonical_payload["recorded_sample_count"], 1)
+            self.assertEqual(activity.canonical_payload["lap_count"], 2)
+            self.assertEqual(activity.canonical_payload["avg_hr"], 145)
+            self.assertEqual(len(activity.artifacts), 1)
+
+            store = SQLiteRecordStore(root / "athlete.sqlite3")
+            ingestion = service.IngestionService(
+                athlete_id="athlete-001", store=store, raw_dir=root / "raw"
+            )
+            first = ingestion.ingest(batch)
+            second = ingestion.ingest(batch)
+            self.assertEqual((first.inserted, first.raw_files), (1, 2))
+            self.assertEqual((second.duplicates, second.raw_files), (1, 0))
+            stored = store.list_current("athlete-001", kind="activity")
+            self.assertEqual(len(stored), 1)
+            self.assertEqual(
+                activity_detail_coverage(stored),
+                {"complete": 1, "partial": 0, "summary_only": 0},
+            )
+            artifact_hash = hashlib.sha256(original).hexdigest()
+            artifact_path = (
+                root / "raw" / "garmin-cn" / "assets" / artifact_hash[:2]
+                / f"{artifact_hash}.zip"
+            )
+            self.assertEqual(artifact_path.read_bytes(), original)
+            self.assertEqual(artifact_path.stat().st_mode & 0o777, 0o600)
+
+            cached_client = FakeClient()
+            cached_gateway = GarminCnSessionGateway(
+                token_dir=root / "tokens",
+                client_factory=lambda **kwargs: cached_client,
+                known_activity_summaries=known_activity_summaries(stored),
+            )
+            self.assertFalse(any(
+                row["kind"] == "activity"
+                for row in cached_gateway.fetch(date(2026, 10, 26), date(2026, 10, 26))
+            ))
+            self.assertEqual(cached_client.detail_calls, 0)
+
+            class FailingRefreshClient(FakeClient):
+                def get_activity_details(self, activity_id: str) -> dict[str, object]:
+                    raise RuntimeError("temporary failure")
+
+            source["activityName"] = "Renamed Morning Run"
+            failing_gateway = GarminCnSessionGateway(
+                token_dir=root / "tokens",
+                client_factory=lambda **kwargs: FailingRefreshClient(),
+                known_activity_summaries=known_activity_summaries(stored),
+            )
+            self.assertFalse(any(
+                row["kind"] == "activity"
+                for row in failing_gateway.fetch(date(2026, 10, 26), date(2026, 10, 26))
+            ))
+
+    def test_garmin_missing_detail_is_explicit_and_not_cached_as_complete(self) -> None:
+        class PartialClient:
+            def get_activity(self, activity_id: str) -> dict[str, object]:
+                return {"activityId": 42}
+
+            def get_activity_details(self, activity_id: str) -> dict[str, object]:
+                raise RuntimeError("unavailable")
+
+            def download_activity(self, activity_id: str, dl_fmt: object) -> bytes:
+                return b"not-a-zip"
+
+            def __getattr__(self, name: str):
+                return lambda *args: []
+
+        source = {"activityId": 42, "startTimeGMT": "2026-10-26 08:00:00"}
+        row = GarminCnSessionGateway._activity_row(
+            PartialClient(), source, date(2026, 10, 26), 0, "summary-digest"
+        )
+        activity = GarminCnConnector._to_raw(row)
+        self.assertEqual(activity.canonical_payload["detail_status"], "partial")
+        self.assertEqual(activity.artifacts, ())
+        self.assertIn("details", activity.canonical_payload["detail_missing_sections"])
+        self.assertIn("original_fit_zip", activity.canonical_payload["detail_missing_sections"])
+
+    def test_rejects_mismatched_original_file_hash_before_persisting(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            ingestion = service.IngestionService(
+                athlete_id="athlete-001",
+                store=SQLiteRecordStore(root / "athlete.sqlite3"),
+                raw_dir=root / "raw",
+            )
+            batch = data_source.SyncBatch((data_source.RawSourceRecord(
+                source="garmin-cn",
+                kind="activity",
+                source_id="42",
+                occurred_at=datetime(2026, 10, 26, tzinfo=UTC),
+                payload={"_sync": {"original_fit_zip_sha256": "wrong"}},
+                artifacts=(data_source.RawSourceArtifact("fit-zip", b"bytes"),),
+            ),))
+            with self.assertRaisesRegex(ValueError, "artifact hash"):
+                ingestion.ingest(batch)
+            self.assertEqual(list((root / "raw").rglob("*")), [])
+
     def test_raw_source_rejects_unsafe_path_components(self) -> None:
         for source in (".", "..", "../escaped", "/absolute", "nested/source", r"nested\source"):
             with self.subTest(source=source), self.assertRaisesRegex(ValueError, "source"):

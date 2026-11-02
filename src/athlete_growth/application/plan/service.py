@@ -7,7 +7,6 @@ import json
 from dataclasses import asdict, replace
 from datetime import UTC, date, datetime, timedelta
 
-from athlete_growth.adapters.storage.sqlite_records import SQLiteRecordStore
 from athlete_growth.domain.goals import Goal
 from athlete_growth.domain.records import CanonicalRecord
 from athlete_growth.domain.safety import RiskLevel, SafetyAssessment
@@ -16,10 +15,11 @@ from athlete_growth.domain.training import (
     TrainingConstraints,
     TrainingPlan,
 )
+from athlete_growth.ports.repositories import CanonicalRecordRepository
 
 
 class TrainingPlanner:
-    algorithm_version = "training-planner/1.0"
+    algorithm_version = "training-planner/1.2"
 
     def generate(
         self,
@@ -29,10 +29,72 @@ class TrainingPlanner:
         constraints: TrainingConstraints,
         safety: SafetyAssessment,
         start_date: date,
+        recent_sessions: tuple[tuple[str, int, date], ...] = (),
     ) -> TrainingPlan:
-        remaining = constraints.max_weekly_minutes
+        recent = [item for item in recent_sessions if 0 < (start_date - item[2]).days <= 28]
+        observed_longest = {
+            sport: max(
+                (minutes for logged_sport, minutes, _ in recent if logged_sport == sport), default=0
+            )
+            for sport in constraints.allowed_sports
+        }
+        # The user-provided maximum is a ceiling, never a target to fill.
+        weekly_history = [
+            sum(
+                minutes
+                for _, minutes, day in recent
+                if start_date - timedelta(days=7 * (week + 1))
+                <= day
+                < start_date - timedelta(days=7 * week)
+            )
+            for week in range(4)
+        ]
+        observed_ceiling = max(weekly_history, default=0)
+        available_days = sum(
+            1
+            for offset in range(7)
+            if (start_date + timedelta(days=offset)).weekday()
+            not in constraints.unavailable_weekdays
+            and constraints.available_minutes_by_weekday.get(
+                (start_date + timedelta(days=offset)).weekday(), 0
+            )
+            > 0
+        )
+        provisional_ceiling = 45 * available_days
+        remaining = min(constraints.max_weekly_minutes, observed_ceiling or provisional_ceiling)
         sessions: list[PlannedSession] = []
-        sport = constraints.allowed_sports[0] if constraints.allowed_sports else "general"
+        sports = constraints.allowed_sports
+        focus = constraints.focus_sport or sports[0]
+        available_dates = [
+            start_date + timedelta(days=offset)
+            for offset in range(7)
+            if (start_date + timedelta(days=offset)).weekday()
+            not in constraints.unavailable_weekdays
+            and constraints.available_minutes_by_weekday.get(
+                (start_date + timedelta(days=offset)).weekday(), 0
+            )
+            > 0
+        ]
+        long_date = next(
+            (day for day in available_dates if day.weekday() == constraints.preferred_long_weekday),
+            None,
+        )
+        quality_date = next(
+            (
+                day
+                for day in available_dates
+                if day.weekday() == constraints.preferred_quality_weekday
+            ),
+            None,
+        )
+        can_key = safety.level == RiskLevel.LOW and observed_longest.get(focus, 0) > 0
+        if not can_key or (
+            long_date and quality_date and abs((long_date - quality_date).days) <= 1
+        ):
+            quality_date = None
+        if not can_key:
+            long_date = None
+        key_dates = {day for day in (quality_date, long_date) if day is not None}
         for offset in range(7):
             session_date = start_date + timedelta(days=offset)
             weekday = session_date.weekday()
@@ -41,11 +103,66 @@ class TrainingPlanner:
             available = constraints.available_minutes_by_weekday.get(weekday, 0)
             if available <= 0 or remaining <= 0:
                 continue
-            duration = min(available, remaining)
-            intensity, load_factor, objective = self._prescription(
-                safety.level, len(sessions), goal
+            session_type = (
+                "quality"
+                if session_date == quality_date
+                else "long"
+                if session_date == long_date
+                else "recovery"
+                if any(
+                    (session_date - item.session_date).days == 1
+                    and item.session_type in {"quality", "long"}
+                    for item in sessions
+                )
+                else "aerobic"
             )
-            load = round(duration * load_factor, 1)
+            sport = (
+                focus
+                if session_type in {"quality", "long"} or constraints.aerobic_mixing is False
+                else sports[len(sessions) % len(sports)]
+            )
+            # Do not prescribe an unobserved long session from availability alone.
+            exposure_cap = observed_longest.get(sport, 0) or 45
+            reserve = sum(
+                min(
+                    constraints.available_minutes_by_weekday.get(day.weekday(), 0),
+                    observed_longest.get(focus, 0),
+                )
+                // 2
+                for day in key_dates
+                if day > session_date
+            )
+            duration = min(available, max(0, remaining - reserve), exposure_cap)
+            if session_type == "recovery":
+                prior_key = next(
+                    (
+                        item
+                        for item in reversed(sessions)
+                        if (session_date - item.session_date).days == 1
+                        and item.session_type in {"quality", "long"}
+                    ),
+                    None,
+                )
+                if prior_key is not None:
+                    duration = min(duration, max(1, prior_key.duration_min // 2))
+            if duration <= 0:
+                continue
+            intensity = (
+                "rest"
+                if safety.level == RiskLevel.HIGH
+                else "quality"
+                if session_type == "quality"
+                else "easy"
+            )
+            objective = (
+                f"Goal-specific session for {goal.title}; review current effort and recovery."
+                if session_type == "quality"
+                else f"Observed-duration endurance session for {goal.title}."
+                if session_type == "long"
+                else f"Easy cross-training after a key session for {goal.title}."
+                if session_type == "recovery"
+                else f"Sustainable aerobic support for {goal.title}."
+            )
             session_id = self._digest(
                 athlete_id, goal.goal_id, session_date.isoformat(), str(len(sessions))
             )
@@ -57,7 +174,8 @@ class TrainingPlanner:
                     duration,
                     intensity,
                     objective,
-                    load,
+                    0.0 if safety.level == RiskLevel.HIGH else float(duration),
+                    session_type=session_type,
                 )
             )
             remaining -= duration
@@ -140,7 +258,7 @@ class TrainingPlanner:
             previous_plan_id=current.plan_id,
         )
 
-    def save(self, plan: TrainingPlan, store: SQLiteRecordStore) -> CanonicalRecord:
+    def save(self, plan: TrainingPlan, store: CanonicalRecordRepository) -> CanonicalRecord:
         record = CanonicalRecord.create(
             athlete_id=plan.athlete_id,
             kind="training-plan",

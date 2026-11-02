@@ -87,6 +87,32 @@ class IngestionService:
                 ).append(current)
         for raw in batch.records:
             sources.add(raw.source)
+            for artifact in raw.artifacts:
+                artifact_digest = hashlib.sha256(artifact.content).hexdigest()
+                if artifact.format == "fit-zip":
+                    sync_metadata = raw.payload.get("_sync")
+                    expected_digest = (
+                        sync_metadata.get("original_fit_zip_sha256")
+                        if isinstance(sync_metadata, dict)
+                        else None
+                    )
+                    if expected_digest is not None and expected_digest != artifact_digest:
+                        raise ValueError("source artifact hash does not match its metadata")
+                artifact_destination = (
+                    self.raw_dir / raw.source / "assets" / artifact_digest[:2]
+                    / f"{artifact_digest}.zip"
+                )
+                created, staged_artifact = self._stage_raw_file(
+                    artifact_destination,
+                    artifact.content,
+                    raw.source,
+                    artifact_digest,
+                    raw_root=self.raw_dir,
+                    raw_staging_dir=raw_staging_dir,
+                )
+                raw_files += int(created)
+                if staged_artifact is not None:
+                    staged_raw_files.append((staged_artifact, artifact_destination))
             payload_bytes = json.dumps(
                 raw.payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
             ).encode("utf-8")
@@ -121,6 +147,16 @@ class IngestionService:
                 quality_flags=flags,
             )
             source_key = (raw.source, raw.kind, raw.source_id)
+            if raw.kind == "activity" and source_key not in current_by_source and any(
+                self._same_activity_from_other_source(record, candidate, raw.source)
+                for versions in current_by_source.values()
+                for record in versions
+                if record.kind == "activity"
+            ):
+                # Keep the immutable source payload in Raw Vault, but do not
+                # count the same workout twice in load and progress reports.
+                duplicates += 1
+                continue
             retired_records = self._retire_legacy_daily_duplicates(
                 raw,
                 canonical_payload,
@@ -210,7 +246,7 @@ class IngestionService:
         target = (
             destination
             if raw_staging_dir is None
-            else raw_staging_dir / source / digest[:2] / destination.name
+            else raw_staging_dir / destination.relative_to(raw_root)
         )
         require_strict_child(raw_root, target, "raw staging target")
         target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -287,6 +323,27 @@ class IngestionService:
                 self.store.retire(record.record_id, connection=connection)
                 retired.append(record)
         return tuple(retired)
+
+    @staticmethod
+    def _same_activity_from_other_source(
+        existing: CanonicalRecord, candidate: CanonicalRecord, source: str
+    ) -> bool:
+        if source not in {"garmin-cn", "coros"} or not any(
+            item.source in {"garmin-cn", "coros"} and item.source != source
+            for item in existing.evidence
+        ):
+            return False
+        if abs((existing.occurred_at - candidate.occurred_at).total_seconds()) > 2:
+            return False
+        for key, tolerance in (("duration_min", 1 / 60), ("distance_m", 1.0)):
+            left, right = existing.data.get(key), candidate.data.get(key)
+            if (
+                isinstance(left, bool) or not isinstance(left, (int, float))
+                or isinstance(right, bool) or not isinstance(right, (int, float))
+                or abs(left - right) > tolerance
+            ):
+                return False
+        return True
 
     @staticmethod
     def _equivalent(existing: CanonicalRecord, candidate: CanonicalRecord) -> bool:
@@ -389,6 +446,8 @@ class IngestionService:
         non_negative_metrics = {
             "avg_hr",
             "avg_speed_mps",
+            "avg_power_w",
+            "avg_cadence_rpm",
             "body_battery",
             "calories",
             "distance_m",

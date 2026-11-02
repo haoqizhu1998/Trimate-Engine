@@ -50,6 +50,28 @@ class RaceStrategyTests(unittest.TestCase):
             self.assertIn("Demo Half Marathon", output.read_text(encoding="utf-8"))
             self.assertIn("user-provided", output.read_text(encoding="utf-8"))
 
+    def test_short_running_race_does_not_get_long_race_fueling_target(self) -> None:
+        from datetime import UTC, date, datetime
+
+        from athlete_growth.domain.race import RaceEvent
+
+        event = RaceEvent(
+            "10k",
+            "Synthetic 10K",
+            date(2027, 1, 10),
+            10,
+            0,
+            "Demo City",
+            "unverified:user-input",
+            datetime.now(UTC),
+            "user-provided/unverified",
+        )
+        strategy = service.RaceStrategyService().build(
+            event=event, target_finish_min=55, forecast=None
+        )
+        self.assertTrue(any("short races" in item for item in strategy.fueling))
+        self.assertFalse(any("60–90" in item for item in strategy.fueling))
+
 
 if __name__ == "__main__":
     unittest.main()

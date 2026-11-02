@@ -1,0 +1,254 @@
+{
+  "schema_version": 1,
+  "agent": {
+    "id": "athlete-training-partner",
+    "version": "1.7.0",
+    "source": "agent.md",
+    "minimum_capability_version": "1.18"
+  },
+  "skills": [
+    {
+      "id": "athlete-onboarding",
+      "version": "0.1.0",
+      "source": "skills/athlete-onboarding/SKILL.md",
+      "required_tools": [
+        "get_capability_catalog",
+        "get_onboarding_status",
+        "get_profile_summary",
+        "get_sync_status",
+        "get_data_quality"
+      ]
+    },
+    {
+      "id": "athlete-daily-review",
+      "version": "0.1.0",
+      "source": "skills/athlete-daily-review/SKILL.md",
+      "required_tools": [
+        "get_sync_status",
+        "get_today_report",
+        "get_weekly_report",
+        "list_activities",
+        "list_notifications"
+      ]
+    },
+    {
+      "id": "athlete-goal-plan",
+      "version": "0.7.0",
+      "source": "skills/athlete-goal-plan/SKILL.md",
+      "required_tools": [
+        "get_sync_status",
+        "get_data_quality",
+        "get_today_report",
+        "get_training_load_context",
+        "get_sport_calibration",
+        "list_goals",
+        "list_open_planning_drafts",
+        "propose_goal",
+        "confirm_goal",
+        "preview_goal_change",
+        "confirm_goal_change",
+        "preview_plan",
+        "preview_plan_blocks",
+        "preview_plan_adjustment",
+        "confirm_plan",
+        "review_plan",
+        "preview_plan_update",
+        "list_plan_execution",
+        "preview_plan_execution",
+        "confirm_plan_execution",
+        "get_training_preferences",
+        "preview_training_preferences",
+        "confirm_training_preferences",
+        "preview_training_memory",
+        "confirm_training_memory",
+        "list_training_plans"
+      ]
+    },
+    {
+      "id": "athlete-recovery",
+      "version": "0.1.0",
+      "source": "skills/athlete-recovery/SKILL.md",
+      "required_tools": [
+        "get_today_report",
+        "assess_return_to_training",
+        "preview_check_in",
+        "confirm_check_in"
+      ]
+    },
+    {
+      "id": "athlete-race-strategy",
+      "version": "0.2.0",
+      "source": "skills/athlete-race-strategy/SKILL.md",
+      "required_tools": [
+        "preview_race_strategy",
+        "preview_race_segments",
+        "get_today_report",
+        "list_goals"
+      ]
+    },
+    {
+      "id": "athlete-decision-coach",
+      "version": "0.1.0",
+      "source": "skills/athlete-decision-coach/SKILL.md",
+      "required_tools": [
+        "get_today_report",
+        "get_growth_profile",
+        "preview_training_decision",
+        "confirm_training_decision",
+        "list_training_decisions",
+        "record_decision_outcome",
+        "confirm_growth_adaptation",
+        "revoke_growth_adaptation"
+      ]
+    },
+    {
+      "id": "endurance-athlete-assessment",
+      "version": "0.4.0",
+      "source": "skills/endurance-athlete-assessment/SKILL.md",
+      "required_tools": [
+        "get_profile_summary",
+        "list_goals",
+        "get_sport_baseline",
+        "get_sport_calibration",
+        "preview_sport_calibration",
+        "confirm_sport_calibration"
+      ],
+      "availability": "active",
+      "origin": "trimate"
+    },
+    {
+      "id": "body-assessment",
+      "version": "1.0.0",
+      "source": "skills/body-assessment/SKILL.md",
+      "required_tools": [
+        "get_today_report",
+        "get_recent_check_ins",
+        "get_training_load_context",
+        "get_sport_baseline"
+      ],
+      "availability": "active",
+      "origin": "trimate"
+    },
+    {
+      "id": "injury-risk",
+      "version": "0.3.0",
+      "source": "skills/injury-risk/SKILL.md",
+      "required_tools": [
+        "get_today_report",
+        "assess_return_to_training"
+      ],
+      "availability": "active",
+      "origin": "trimate"
+    },
+    {
+      "id": "training-load",
+      "version": "0.1.0",
+      "source": "skills/training-load/SKILL.md",
+      "required_tools": [
+        "get_training_load_context",
+        "get_recent_check_ins",
+        "get_today_report"
+      ],
+      "availability": "active",
+      "origin": "trimate"
+    },
+    {
+      "id": "workout-feedback",
+      "version": "0.7.0",
+      "source": "skills/workout-feedback/SKILL.md",
+      "required_tools": [
+        "get_activity_detail",
+        "analyze_session",
+        "get_recent_check_ins",
+        "get_today_report",
+        "compare_plan_actual",
+        "list_plan_execution",
+        "preview_plan_execution",
+        "confirm_plan_execution"
+      ],
+      "availability": "active",
+      "origin": "trimate"
+    },
+    {
+      "id": "weekly-review",
+      "version": "0.3.0",
+      "source": "skills/weekly-review/SKILL.md",
+      "required_tools": [
+        "get_weekly_report",
+        "get_training_load_context",
+        "get_sport_calibration",
+        "list_plan_execution",
+        "get_recent_check_ins",
+        "list_training_plans"
+      ],
+      "availability": "active",
+      "origin": "trimate"
+    },
+    {
+      "id": "training-plan",
+      "version": "1.12.0",
+      "source": "skills/training-plan/SKILL.md",
+      "required_tools": [
+        "get_today_report",
+        "get_training_load_context",
+        "get_sport_calibration",
+        "list_plan_execution",
+        "list_goals",
+        "preview_plan",
+        "preview_plan_blocks",
+        "preview_plan_update",
+        "confirm_plan"
+      ],
+      "availability": "active",
+      "origin": "trimate"
+    },
+    {
+      "id": "training-nutrition-coach",
+      "version": "0.1.0",
+      "source": "skills/training-nutrition-coach/SKILL.md",
+      "required_tools": [
+        "get_today_report",
+        "preview_fueling_plan",
+        "preview_fueling_logistics"
+      ],
+      "availability": "active",
+      "origin": "trimate"
+    },
+    {
+      "id": "periodic-training-summary",
+      "version": "0.1.0",
+      "source": "skills/periodic-training-summary/SKILL.md",
+      "required_tools": [
+        "get_periodic_training_summary",
+        "render_periodic_training_poster"
+      ],
+      "availability": "active",
+      "origin": "trimate"
+    },
+    {
+      "id": "running-form-analysis",
+      "version": "1.1.0",
+      "source": "skills/running-form-analysis/SKILL.md",
+      "required_tools": [
+        "get_running_form_runtime",
+        "start_running_form_analysis",
+        "get_running_form_job",
+        "get_running_form_contact_sheet"
+      ],
+      "availability": "active",
+      "origin": "trimate"
+    },
+    {
+      "id": "training-memory",
+      "version": "0.2.0",
+      "source": "skills/training-memory/SKILL.md",
+      "required_tools": [
+        "preview_training_memory",
+        "confirm_training_memory",
+        "list_training_memory"
+      ],
+      "availability": "active",
+      "origin": "trimate"
+    }
+  ]
+}

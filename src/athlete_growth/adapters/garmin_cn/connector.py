@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import hashlib
+import io
+import json
+import zipfile
+from collections.abc import Callable, Mapping
 from contextlib import suppress
 from datetime import UTC, date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Protocol, cast
 
-from athlete_growth.domain.records import JsonValue
+from athlete_growth.domain.records import CanonicalRecord, JsonValue
 from athlete_growth.ports.data_source import (
     HealthStatus,
+    RawSourceArtifact,
     RawSourceRecord,
     SourceCapabilities,
     SyncBatch,
@@ -18,6 +23,7 @@ from athlete_growth.ports.data_source import (
 )
 
 CN_TIMEZONE = timezone(timedelta(hours=8))
+MAX_ORIGINAL_FILE_BYTES = 128 * 1024 * 1024
 
 
 class GarminGateway(Protocol):
@@ -40,6 +46,20 @@ class GarminSessionClient(Protocol):
     def get_activities_by_date(
         self, startdate: str, enddate: str
     ) -> list[dict[str, object]]: ...
+
+    def get_activity(self, activity_id: str) -> dict[str, object]: ...
+
+    def get_activity_details(self, activity_id: str) -> dict[str, object]: ...
+
+    def get_activity_laps(self, activity_id: str) -> dict[str, object]: ...
+
+    def get_activity_splits(self, activity_id: str) -> dict[str, object]: ...
+
+    def get_activity_hr_in_timezones(self, activity_id: str) -> dict[str, object]: ...
+
+    def get_activity_power_in_timezones(self, activity_id: str) -> dict[str, object]: ...
+
+    def download_activity(self, activity_id: str, dl_fmt: object) -> bytes: ...
 
     def get_daily_summaries(self, start: str, end: str) -> dict[str, object]: ...
 
@@ -73,11 +93,18 @@ class GarminCnConnector:
     region = "cn"
     auth_method = "session"
 
-    def __init__(self, *, home: Path, gateway: GarminGateway | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        home: Path,
+        gateway: GarminGateway | None = None,
+        known_activity_summaries: Mapping[str, str] | None = None,
+    ) -> None:
         self.home = home
         self.session_token_dir = home / "tokens" / "garmin-cn-session"
         self.session_token_file = self.session_token_dir / "garmin_tokens.json"
         self._gateway = gateway
+        self._known_activity_summaries = dict(known_activity_summaries or {})
 
     def capabilities(self) -> SourceCapabilities:
         return SourceCapabilities(
@@ -100,6 +127,9 @@ class GarminCnConnector:
             suggested_poll_minutes=30,
         )
 
+    def set_known_activity_summaries(self, summaries: Mapping[str, str]) -> None:
+        self._known_activity_summaries = dict(summaries)
+
     def authenticate(
         self, *, email: str, password: str, prompt_mfa: Callable[[], str]
     ) -> dict[str, object]:
@@ -107,7 +137,10 @@ class GarminCnConnector:
         return gateway.authenticate(email, password, prompt_mfa)
 
     def sync(self, window: SyncWindow, cursor: str | None) -> SyncBatch:
-        gateway = self._gateway or GarminCnSessionGateway(token_dir=self.session_token_dir)
+        gateway = self._gateway or GarminCnSessionGateway(
+            token_dir=self.session_token_dir,
+            known_activity_summaries=self._known_activity_summaries,
+        )
         rows = gateway.fetch(window.start, window.end)
         records = tuple(self._to_raw(row) for row in rows)
         return SyncBatch(records, next_cursor=window.end.isoformat())
@@ -135,6 +168,12 @@ class GarminCnConnector:
         if not isinstance(payload, dict):
             raise ValueError("Garmin gateway payload must be an object")
         kind = str(row["kind"])
+        artifact_bytes = row.get("original_file")
+        artifacts = (
+            (RawSourceArtifact("fit-zip", artifact_bytes),)
+            if isinstance(artifact_bytes, bytes) and artifact_bytes
+            else ()
+        )
         canonical_payload = _canonical_payload(kind, payload)
         if kind == "activity":
             calendar_date = row.get("calendar_date")
@@ -153,6 +192,7 @@ class GarminCnConnector:
             occurred_at=occurred.astimezone(UTC),
             payload=cast(dict[str, JsonValue], payload),
             canonical_payload=canonical_payload,
+            artifacts=artifacts,
         )
 
 
@@ -164,9 +204,11 @@ class GarminCnSessionGateway:
         *,
         token_dir: Path,
         client_factory: GarminClientFactory | None = None,
+        known_activity_summaries: Mapping[str, str] | None = None,
     ) -> None:
         self.token_dir = token_dir
         self._client_factory = client_factory
+        self._known_activity_summaries = dict(known_activity_summaries or {})
 
     def authenticate(
         self, email: str, password: str, prompt_mfa: Callable[[], str]
@@ -191,7 +233,32 @@ class GarminCnSessionGateway:
         for index, activity in enumerate(
             client.get_activities_by_date(start_text, end_text)
         ):
-            rows.append(self._row("activity", activity, start, index))
+            activity_id = activity.get("activityId")
+            if activity_id is None:
+                rows.append(self._row("activity", activity, start, index))
+                continue
+            summary_hash = _summary_hash(activity)
+            if self._known_activity_summaries.get(str(activity_id)) == summary_hash:
+                continue
+            activity_row = self._activity_row(client, activity, start, index, summary_hash)
+            payload = activity_row["payload"]
+            sync_metadata = payload.get("_sync") if isinstance(payload, dict) else None
+            missing_sections = (
+                sync_metadata.get("missing_sections", [])
+                if isinstance(sync_metadata, dict)
+                else []
+            )
+            if (
+                str(activity_id) in self._known_activity_summaries
+                and isinstance(missing_sections, list)
+                and any(
+                    name in missing_sections
+                    for name in ("activity", "details", "original_fit_zip")
+                )
+            ):
+                # A transient endpoint failure must not replace a complete version.
+                continue
+            rows.append(activity_row)
 
         range_documents: tuple[tuple[str, object, str | None], ...] = (
             (
@@ -228,6 +295,82 @@ class GarminCnSessionGateway:
                 )
             )
         return rows
+
+    @classmethod
+    def _activity_row(
+        cls,
+        client: GarminSessionClient,
+        summary: dict[str, object],
+        fallback_date: date,
+        index: int,
+        summary_hash: str,
+    ) -> dict[str, object]:
+        activity_id = str(summary["activityId"])
+        row = cls._row("activity", summary, fallback_date, index)
+        sections: dict[str, object] = {}
+        missing: list[str] = []
+        methods = {
+            "activity": "get_activity",
+            "details": "get_activity_details",
+            "laps": "get_activity_laps",
+            "splits": "get_activity_splits",
+            "split_summaries": "get_activity_split_summaries",
+            "typed_splits": "get_activity_typed_splits",
+            "hr_zones": "get_activity_hr_in_timezones",
+            "power_zones": "get_activity_power_in_timezones",
+            "workout_steps": "get_activity_step_details",
+        }
+        activity_type = summary.get("activityType")
+        type_key = activity_type.get("typeKey") if isinstance(activity_type, dict) else None
+        if isinstance(type_key, str) and "swim" in type_key:
+            methods["swim_details"] = "get_activity_swim_details"
+        for section, method_name in methods.items():
+            method = getattr(client, method_name, None)
+            if not callable(method):
+                missing.append(section)
+                continue
+            try:
+                document = method(activity_id)
+            except Exception:
+                missing.append(section)
+                continue
+            if document is None:
+                missing.append(section)
+            else:
+                sections[section] = document
+
+        original: bytes | None = None
+        try:
+            from garminconnect import Garmin
+
+            original = client.download_activity(
+                activity_id, Garmin.ActivityDownloadFormat.ORIGINAL
+            )
+        except Exception:
+            missing.append("original_fit_zip")
+        if (
+            not isinstance(original, bytes)
+            or not original
+            or len(original) > MAX_ORIGINAL_FILE_BYTES
+            or not zipfile.is_zipfile(io.BytesIO(original))
+        ):
+            original = None
+            if "original_fit_zip" not in missing:
+                missing.append("original_fit_zip")
+
+        payload = dict(summary)
+        payload["_activity_sections"] = sections
+        payload["_sync"] = {
+            "summary_sha256": summary_hash,
+            "missing_sections": missing,
+            "original_fit_zip_sha256": (
+                hashlib.sha256(original).hexdigest() if original else None
+            ),
+        }
+        row["payload"] = payload
+        if original is not None:
+            row["original_file"] = original
+        return row
 
     def healthcheck(self) -> bool:
         return self._cached_client().get_userprofile_settings() is not None
@@ -331,31 +474,126 @@ def _parse_garmin_datetime(field: str, value: object) -> datetime:
     return occurred
 
 
+def _summary_hash(summary: dict[str, object]) -> str:
+    encoded = json.dumps(
+        summary, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def known_activity_summaries(records: list[CanonicalRecord]) -> dict[str, str]:
+    """Skip complete, unchanged activities while backfilling legacy summary-only rows."""
+
+    known: dict[str, str] = {}
+    for record in records:
+        if record.kind != "activity" or record.data.get("detail_status") != "complete":
+            continue
+        digest = record.data.get("garmin_summary_sha256")
+        if not isinstance(digest, str):
+            continue
+        for evidence in record.evidence:
+            if evidence.source == "garmin-cn":
+                known[evidence.source_id] = digest
+    return known
+
+
+def activity_detail_coverage(records: list[CanonicalRecord]) -> dict[str, int]:
+    """Count current Garmin activities by locally available detail level."""
+
+    coverage = {"complete": 0, "partial": 0, "summary_only": 0}
+    for record in records:
+        if record.kind != "activity" or not any(
+            item.source == "garmin-cn" for item in record.evidence
+        ):
+            continue
+        status = record.data.get("detail_status")
+        coverage[status if status in {"complete", "partial"} else "summary_only"] += 1
+    return coverage
+
+
+def _activity_laps(sections: dict[str, object]) -> list[dict[str, object]]:
+    for document in (sections.get("laps"), sections.get("activity")):
+        if isinstance(document, dict):
+            candidate = document.get("lapDTOs")
+            if isinstance(candidate, list):
+                return [lap for lap in candidate if isinstance(lap, dict)]
+        elif isinstance(document, list):
+            return [lap for lap in document if isinstance(lap, dict)]
+    return []
+
+
 def _canonical_payload(kind: str, payload: dict[str, object]) -> dict[str, JsonValue]:
     if kind == "activity":
-        activity_type = payload.get("activityType")
+        sections = _object(payload.get("_activity_sections")) or {}
+        full_activity = _object(sections.get("activity")) or {}
+        sync = _object(payload.get("_sync")) or {}
+        combined = {**payload, **full_activity}
+        activity_type = combined.get("activityType")
         sport = activity_type.get("typeKey") if isinstance(activity_type, dict) else None
-        duration_seconds = _number(payload.get("movingDuration"))
+        duration_seconds = _number(combined.get("movingDuration"))
         if duration_seconds is None:
-            duration_seconds = _number(payload.get("duration"))
+            duration_seconds = _number(combined.get("duration"))
+        power = _first_number(combined, "avgPower", "averagePower")
+        cadence = _first_number(
+            combined, "averageBikingCadenceInRevPerMinute", "avgCadence"
+        )
+        raw_laps = _activity_laps(sections)
+        laps = [
+            {
+                "duration_min": (
+                    duration / 60
+                    if (duration := _first_number(lap, "movingDuration", "duration"))
+                    is not None
+                    else None
+                ),
+                "distance_m": _number(lap.get("distance")),
+                "avg_hr": _first_number(lap, "averageHR", "averageHeartRate"),
+                "avg_power_w": _first_number(lap, "averagePower", "avgPower"),
+            }
+            for lap in raw_laps[:200]
+        ]
+        missing = sync.get("missing_sections")
+        detail_document = _object(sections.get("details")) or {}
+        recorded_samples = detail_document.get("activityDetailMetrics")
+        critical_missing = (
+            isinstance(missing, list)
+            and any(name in missing for name in ("activity", "details", "original_fit_zip"))
+        )
         return cast(
             dict[str, JsonValue],
             {
-                "name": _scalar(payload.get("activityName")),
+                "name": _scalar(combined.get("activityName")),
                 "sport": _scalar(sport),
                 "duration_min": duration_seconds / 60 if duration_seconds is not None else None,
-                "distance_m": _number(payload.get("distance")),
-                "training_load": _number(payload.get("activityTrainingLoad")),
+                "distance_m": _number(combined.get("distance")),
+                "training_load": _number(combined.get("activityTrainingLoad")),
                 "high_intensity_min": _non_negative_number(
-                    payload.get("vigorousIntensityMinutes")
+                    combined.get("vigorousIntensityMinutes")
                 ),
-                "avg_hr": _number(payload.get("averageHR")),
-                "max_hr": _number(payload.get("maxHR")),
-                "avg_speed_mps": _number(payload.get("averageSpeed")),
-                "elevation_gain_m": _number(payload.get("elevationGain")),
-                "calories": _number(payload.get("calories")),
-                "steps": _number(payload.get("steps")),
-                "device_id": _scalar(payload.get("deviceId")),
+                "avg_hr": _number(combined.get("averageHR")),
+                "max_hr": _number(combined.get("maxHR")),
+                "avg_speed_mps": _number(combined.get("averageSpeed")),
+                **({"avg_power_w": power} if power is not None else {}),
+                **({"avg_cadence_rpm": cadence} if cadence is not None else {}),
+                "elevation_gain_m": _number(combined.get("elevationGain")),
+                "calories": _number(combined.get("calories")),
+                "steps": _number(combined.get("steps")),
+                "device_id": _scalar(combined.get("deviceId")),
+                **({"pool_length_m": _number(combined.get("poolLength"))}
+                   if combined.get("poolLength") is not None else {}),
+                **({"lap_count": len(raw_laps), "laps": laps} if raw_laps else {}),
+                **(
+                    {
+                        "garmin_summary_sha256": sync.get("summary_sha256"),
+                        "detail_status": "partial" if critical_missing else "complete",
+                        "detail_missing_sections": missing if isinstance(missing, list) else [],
+                        "original_fit_zip_sha256": sync.get("original_fit_zip_sha256"),
+                        "recorded_sample_count": (
+                            len(recorded_samples) if isinstance(recorded_samples, list) else 0
+                        ),
+                    }
+                    if sync else {}
+                ),
             },
         )
     if kind == "daily-summary":

@@ -37,7 +37,8 @@ class GoalConflict:
 
 
 def detect_conflicts(goals: list[Goal]) -> list[GoalConflict]:
-    active = [goal for goal in goals if goal.status == "active" and goal.priority >= 4]
+    # Priority is a rank: 1 is the most important goal.
+    active = [goal for goal in goals if goal.status == "active" and goal.priority <= 2]
     conflicts: list[GoalConflict] = []
     for index, left in enumerate(active):
         for right in active[index + 1 :]:

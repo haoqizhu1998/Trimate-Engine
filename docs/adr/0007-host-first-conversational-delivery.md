@@ -3,7 +3,9 @@
 - 状态：已接受
 - 日期：2026-10-26
 
-> **实现状态（2026-10-26）**：本文描述的是目标架构，不是当前已安装的宿主能力。GPT/Codex、WorkBuddy、Coze 的 MCP/Plugin/OpenAPI 传输、版本化 Tool Catalog、持久化新手引导状态机、OAuth/OIDC 身份映射、自托管远程模式和托管模式均尚未实现。当前可用界面是本地 CLI、JSON-safe 的宿主无关 Python facade，以及 macOS `launchd` 调度器和系统通知适配器。
+> **实现状态（2026-10-27）**：本文主要描述目标架构，不是当前已安装的完整跨宿主能力。已有本地 CLI、版本化能力目录、宿主无关 Python facade、覆盖阶段 0–5 适合对话能力的本地 stdio MCP，以及 macOS `launchd` 调度器和系统通知适配器。当前项目 Codex 原生连接已验证。统一结果 envelope、持久化新手引导状态机、独立真人确认通道、OAuth/OIDC 身份映射、自托管远程模式和托管模式均尚未实现。工具分级决策见 ADR 0009。
+
+> **后续修订**：[ADR 0010](0010-product-owned-agent-and-skills.md) 已将Trimate Agent 和 Skill 定为产品自有的核心资产；本文有关 Skill 仅为可选宿主说明的文字应按 ADR 0010 理解。
 
 ## 背景
 
@@ -19,9 +21,11 @@
 
 ### 1. 产品核心不属于任何模型宿主
 
-`domain` 和 `application` 仍是唯一权威业务引擎。训练指标、安全规则、授权、去重、计划版本和用户数据均不存在于 ChatGPT、WorkBuddy 或 Coze 的 Prompt 中。宿主只负责对话编排、工具选择和结果展示。
+`domain` 和 `application` 仍是唯一权威业务引擎。训练指标、安全规则、授权、去重、计划版本和用户数据均不存在于 ChatGPT、WorkBuddy 或 Coze 的 Prompt 中。产品自有 Agent/Skill 定义对话编排方法；宿主适配执行该方法、调用工具并展示结果。
 
-### 2. 统一工具协议是主产品入口
+产品采用“一个Trimate对话入口 + 多个独立产品能力”，而不是每个能力各自持有一套 Agent、状态和规则。产品自有 Agent/Skill 定义对话与训练服务方法，宿主中的呈现是当前首选**用户入口**，但不是产品唯一入口；未来 Web/App、CLI 也可以调用同一批应用用例。Skill 不负责训练计划、目标或数据存储的执行。MCP/HTTP 是连接协议，不是训练决策层。
+
+### 2. 统一工具契约是产品对外边界
 
 产品对外暴露一份带版本的 Tool Catalog，再通过两种传输适配：
 
@@ -30,11 +34,15 @@
 
 CLI 继续保留，但定位改为开发、诊断、恢复和无宿主降级入口，不再是新用户的主交互面。
 
+依赖方向固定为：产品 Agent/Skill → 宿主适配 → MCP 或 HTTP 传输适配器 → 统一工具契约 → 应用用例 → 领域规则与数据端口。宿主不得绕开应用用例直接读写 SQLite，也不得自行保存一个与产品不一致的目标或计划版本。
+
 模型宿主与模型 Provider 必须分开配置。宿主负责人与产品的对话；Provider 是否被调用、调用哪家模型以及发送哪些字段，仍由产品引擎根据用户授权和隐私策略决定。在 ChatGPT 中使用产品不等于默认允许把原始健康数据发送给 OpenAI。
 
 ### 3. 宿主包只包含适配信息
 
 每个宿主包可以包含安装清单、工具描述、对话指南、工作流和展示模板，但不复制训练规则或用户数据。
+
+产品自有 Skill 定义是服务方法资产；宿主原生 Skill 安装形式不是必装前提。不支持原生 Skill 的宿主可通过 Agent 配置、工具描述、Workflow 或 UI 映射同一方法，并通过该宿主的行为验收。缺少原生 Skill 机制不得导致已连接的核心工具能力无法调用。
 
 ```text
 hosts/
@@ -61,6 +69,8 @@ engine_ready
 ```
 
 用户换宿主、换模型或关闭对话后可继续，不会重新走一遍。
+
+其中 `goal_required` 从用户自然语言想法开始。目标共创应用用例产生带假设、缺口和冲突提示的目标草案；确定性规则检查字段、可行性边界和安全约束；用户确认后才保存目标。计划用例只能依据已确认目标生成可预览草案，用户确认后才保存计划。宿主 Agent 可帮助理解与追问，但不能仅凭对话文本声称目标或计划已经生效。
 
 ### 5. 工具返回宿主无关的结构化结果
 
@@ -106,9 +116,11 @@ automation.get_status
 report.get_today
 report.get_weekly
 check_in.record
-goal.create
+goal.propose
+goal.confirm
 goal.list
-plan.create_first_week
+plan.preview
+plan.confirm
 plan.review
 data.get_quality
 notification.configure
@@ -118,6 +130,10 @@ data.export_confirm
 ```
 
 工具数量应保持少而稳定，避免模型因相似工具过多而选择错误。
+
+以上是目标工具契约，不等同于当前 MCP 的精确工具名。当前本地工具清单由 `interfaces/host/catalog.py` 与 MCP `tools/list` 给出。初版将“从用户想法提议目标”与“补充/修订草案”实现为一个带草案 ID 的用例，避免把每个追问拆成独立工具。
+
+当前本地 MCP 已映射 `propose_goal`、`confirm_goal`、`preview_plan`、`confirm_plan` 和 `list_open_planning_drafts` 到这一流程。草案 ID 与版本保证两步操作和旧草案拒绝，不能证明真人已确认；远程开放确认类工具前仍须实现独立授权与确认机制。当前计划生成仍是基础 7 天排课，不满足本文长期个性化计划的全部目标。
 
 ## 后果
 

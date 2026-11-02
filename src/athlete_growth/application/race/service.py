@@ -42,6 +42,19 @@ class RaceStrategyService:
         shift = (travel_context or {}).get("timezone_shift_hours", 0)
         if abs(shift) >= 2:
             logistics.append("Allow adaptation time for the reported timezone shift.")
+        fueling = (
+            (
+                "Use only rehearsed fuel; consider a long-race carbohydrate plan "
+                "that matches the athlete's tested tolerance.",
+                "Carry or identify fluid access points before race day.",
+            )
+            if target_finish_min >= 150
+            else (
+                "Use a familiar pre-race meal; short races do not inherit a "
+                "long-race hourly carbohydrate target.",
+                "Confirm whether fluid access is needed for the expected duration and conditions.",
+            )
+        )
         return RaceStrategy(
             event,
             target_finish_min,
@@ -50,10 +63,7 @@ class RaceStrategyService:
                 "Start conservatively and use effort on climbs.",
                 "Review pace after halfway; do not force the target if safety signals change.",
             ),
-            (
-                "Use only rehearsed fuel; plan 60–90 g carbohydrate per hour for long races.",
-                "Carry or identify fluid access points before race day.",
-            ),
+            fueling,
             ("Use tested shoes, clothing and weather-appropriate layers.",),
             tuple(logistics),
             tuple(risks),

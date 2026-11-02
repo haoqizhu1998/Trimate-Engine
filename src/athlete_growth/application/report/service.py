@@ -6,11 +6,11 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
-from athlete_growth.adapters.storage.sqlite_records import SQLiteRecordStore
 from athlete_growth.application.analyze.service import TrainingAnalytics
 from athlete_growth.domain.analytics import AnalysisResult
 from athlete_growth.domain.records import CanonicalRecord, JsonValue
 from athlete_growth.domain.safety import SafetyAssessment, SafetyRules
+from athlete_growth.ports.repositories import CanonicalRecordRepository
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,7 +30,7 @@ class ReportService:
     def __init__(
         self,
         athlete_id: str,
-        store: SQLiteRecordStore,
+        store: CanonicalRecordRepository,
         *,
         timezone_name: str = "UTC",
         projection_record_ids: tuple[str, ...] | None = None,
@@ -71,8 +71,6 @@ class ReportService:
         safety = self.safety_rules.assess(
             check_in=check_in,
             observations=objective_records,
-            acute_load=self._metric(analytics, "acute_load"),
-            chronic_load=self._metric(analytics, "chronic_weekly_load"),
         )
         evidence = tuple(
             dict.fromkeys(
@@ -119,8 +117,6 @@ class ReportService:
         safety = self.safety_rules.assess(
             check_in=latest_check_in,
             observations=observations[-1:],
-            acute_load=self._metric(analytics, "acute_load"),
-            chronic_load=self._metric(analytics, "chronic_weekly_load"),
         )
         objective: dict[str, JsonValue] = {
             "activity_count": sum(record.kind == "activity" for record in records),
@@ -158,8 +154,3 @@ class ReportService:
             start=start,
             end=end,
         )
-
-    @staticmethod
-    def _metric(result: AnalysisResult, name: str) -> float | None:
-        value = result.metrics.get(name)
-        return float(value) if isinstance(value, (int, float)) else None

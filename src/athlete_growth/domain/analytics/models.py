@@ -12,3 +12,5 @@ class AnalysisResult:
     data_gaps: tuple[str, ...]
     confidence: float
     algorithm_version: str
+    load_method: str | None = None
+    load_comparable_count: int = 0

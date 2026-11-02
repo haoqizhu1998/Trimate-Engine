@@ -410,7 +410,8 @@ class AutomaticTrainingLoop:
         if notification_policy.notification_mode is not NotificationMode.OFF and not notifications:
             selected = self._select_persisted_snapshot(snapshots)
             risk_level = selected.risk_level
-            actionable = risk_level in {"moderate", "high"}
+            plan_review_due = self._active_plan_review_due(change_set, timezone_name)
+            actionable = risk_level in {"moderate", "high"} or plan_review_due
             deliver_after = None
             if (
                 notification_policy.notification_mode is NotificationMode.ACTIONABLE_DIGEST
@@ -428,11 +429,22 @@ class AutomaticTrainingLoop:
                 selected,
                 priority="actionable" if actionable else "digest",
                 deliver_after=deliver_after,
-                title=f"Training data updated: {risk_level} risk",
-                body=self._persisted_notification_body(
-                    len(change_set.record_ids),
-                    risk_level,
-                    selected.report,
+                title=(
+                    "Training plan needs review"
+                    if plan_review_due and risk_level not in {"moderate", "high"}
+                    else f"Training data updated: {risk_level} risk"
+                ),
+                body=(
+                    self._persisted_notification_body(
+                        len(change_set.record_ids), risk_level, selected.report
+                    )
+                    + (
+                        " A new activity falls within an approved plan week. "
+                        "Review possible session matches and report effort or symptoms "
+                        "before changing upcoming sessions."
+                        if plan_review_due
+                        else ""
+                    )
                 ),
                 created_at=effect_at,
                 run_id=run.run_id,
@@ -456,6 +468,54 @@ class AutomaticTrainingLoop:
             snapshots=len(snapshots),
             notifications=len(notifications),
         )
+
+    def _active_plan_review_due(self, change_set: DataChangeSet, timezone_name: str) -> bool:
+        """A new activity in an active plan week merits review, not an automatic edit."""
+        zone = ZoneInfo(timezone_name)
+        today = self._now().astimezone(zone).date()
+        activity_days = {
+            record.occurred_at.astimezone(zone).date()
+            for record_id in change_set.record_ids
+            if (record := self.record_store.get(record_id)) is not None
+            and record.athlete_id == change_set.athlete_id
+            and record.kind == "activity"
+        }
+        if not activity_days:
+            return False
+        latest_by_goal = {}
+        for record in self.record_store.list_current(change_set.athlete_id, kind="training-plan"):
+            goal_id = str(record.data.get("goal_id"))
+            current = latest_by_goal.get(goal_id)
+            if current is None or int(str(record.data.get("version", 0))) > int(
+                str(current.data.get("version", 0))
+            ):
+                latest_by_goal[goal_id] = record
+        for plan in latest_by_goal.values():
+            if plan.data.get("status") != "approved":
+                continue
+            start_text = plan.data.get("start_date")
+            if start_text is None:
+                sessions = plan.data.get("sessions")
+                dates = (
+                    [
+                        str(item.get("session_date"))
+                        for item in sessions
+                        if isinstance(item, dict) and item.get("session_date")
+                    ]
+                    if isinstance(sessions, list)
+                    else []
+                )
+                start_text = min(dates) if dates else None
+            if start_text is None:
+                continue
+            try:
+                start = date.fromisoformat(str(start_text))
+            except ValueError:
+                continue
+            end = start + timedelta(days=6)
+            if start <= today <= end and any(start <= day <= end for day in activity_days):
+                return True
+        return False
 
     @staticmethod
     def _select_persisted_snapshot(

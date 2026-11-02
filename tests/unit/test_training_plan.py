@@ -56,6 +56,26 @@ class TrainingPlanTests(unittest.TestCase):
         self.assertTrue(all(session.expected_load == 0 for session in plan.sessions))
         self.assertTrue(all(session.intensity == "rest" for session in plan.sessions))
 
+    def test_multisport_allocation_uses_each_requested_discipline(self) -> None:
+        constraints = models.TrainingConstraints(
+            available_minutes_by_weekday={0: 45, 1: 60, 2: 50, 3: 45},
+            unavailable_weekdays=frozenset(),
+            max_weekly_minutes=200,
+            allowed_sports=("swimming", "cycling", "running"),
+        )
+        goal = Goal("g2", "athlete-001", "race", "Triathlon", 5, date(2027, 1, 1))
+        plan = service.TrainingPlanner().generate(
+            athlete_id="athlete-001",
+            goal=goal,
+            constraints=constraints,
+            safety=SafetyAssessment(RiskLevel.LOW, (), (), (), ()),
+            start_date=date(2026, 10, 26),
+        )
+        self.assertEqual(
+            [session.sport for session in plan.sessions],
+            ["swimming", "cycling", "running", "swimming"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

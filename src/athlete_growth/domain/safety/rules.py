@@ -34,8 +34,6 @@ class SafetyRules:
         *,
         check_in: CanonicalRecord | None,
         observations: list[CanonicalRecord],
-        acute_load: float | None = None,
-        chronic_load: float | None = None,
     ) -> SafetyAssessment:
         level = RiskLevel.LOW
         reasons: list[str] = []
@@ -67,17 +65,6 @@ class SafetyRules:
                 level = RiskLevel.MODERATE
                 reasons.append("subjective recovery signal is elevated")
                 actions.append("Reduce intensity and reassess during the session.")
-
-        if acute_load is not None and chronic_load is not None and chronic_load > 0:
-            ratio = acute_load / chronic_load
-            if ratio >= 1.8:
-                level = RiskLevel.HIGH
-                reasons.append("acute load is substantially above recent baseline")
-                actions.append("Avoid adding load until recovery and baseline are reviewed.")
-            elif ratio >= 1.5 and level not in {RiskLevel.HIGH}:
-                level = RiskLevel.MODERATE
-                reasons.append("acute load is above recent baseline")
-                actions.append("Reduce planned load and prioritize recovery.")
 
         for observation in observations:
             evidence.append(observation.record_id)

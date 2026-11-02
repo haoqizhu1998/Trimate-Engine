@@ -31,6 +31,8 @@ class FileImporterTests(unittest.TestCase):
         self.assertEqual(record.payload["sport"], "running")
         self.assertEqual(record.payload["duration_min"], 30.0)
         self.assertEqual(record.payload["distance_m"], 5000.0)
+        self.assertEqual(record.payload["lap_count"], 1)
+        self.assertEqual(record.payload["laps"][0]["distance_m"], 5000.0)
 
 
 if __name__ == "__main__":

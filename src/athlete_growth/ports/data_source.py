@@ -53,11 +53,24 @@ class RawSourceRecord:
     occurred_at: datetime
     payload: dict[str, JsonValue]
     canonical_payload: dict[str, JsonValue] | None = None
+    artifacts: tuple[RawSourceArtifact, ...] = ()
 
     def __post_init__(self) -> None:
         require_safe_component(self.source, "source")
         if self.occurred_at.tzinfo is None or self.occurred_at.utcoffset() is None:
             raise ValueError("occurred_at must be timezone-aware")
+
+
+@dataclass(frozen=True, slots=True)
+class RawSourceArtifact:
+    """Private original source bytes, stored separately from JSON projections."""
+
+    format: Literal["fit-zip"]
+    content: bytes
+
+    def __post_init__(self) -> None:
+        if self.format != "fit-zip" or not self.content:
+            raise ValueError("unsupported or empty source artifact")
 
 
 @dataclass(frozen=True, slots=True)

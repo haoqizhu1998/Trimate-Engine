@@ -13,8 +13,8 @@ class GoalTests(unittest.TestCase):
         self.assertIsNotNone(goal_type)
         self.assertIsNotNone(detector)
         goals = [
-            goal_type("g1", "athlete-001", "race", "Marathon", 5, date(2027, 1, 1)),
-            goal_type("g2", "athlete-001", "body", "Lose weight", 5, date(2027, 1, 8)),
+            goal_type("g1", "athlete-001", "race", "Marathon", 1, date(2027, 1, 1)),
+            goal_type("g2", "athlete-001", "body", "Lose weight", 2, date(2027, 1, 8)),
         ]
 
         conflicts = detector(goals)

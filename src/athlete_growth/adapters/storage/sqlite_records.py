@@ -100,6 +100,41 @@ class SQLiteRecordStore:
             )
             return cursor.rowcount == 1
 
+    def replace_singleton(
+        self,
+        athlete_id: str,
+        kind: str,
+        expected_record_id: str | None,
+        replacement: CanonicalRecord,
+    ) -> CanonicalRecord:
+        """Compare and replace one profile-local projection without losing history."""
+        if replacement.athlete_id != athlete_id or replacement.kind != kind:
+            raise ValueError("replacement does not match profile and kind")
+        if replacement.supersedes_id != expected_record_id:
+            raise ValueError("replacement does not identify the prior record")
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                "SELECT record_id FROM canonical_records WHERE athlete_id = ? "
+                "AND kind = ? AND is_current = 1",
+                (athlete_id, kind),
+            ).fetchall()
+            current_ids = [str(row["record_id"]) for row in rows]
+            if current_ids != ([expected_record_id] if expected_record_id else []):
+                raise ValueError("training preferences changed; preview them again")
+            if expected_record_id is not None:
+                self.retire(expected_record_id, connection=connection)
+            if not self.save(replacement, connection=connection):
+                raise ValueError("training preference version already exists")
+            connection.commit()
+            return replacement
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
     def correct(
         self,
         original_id: str,

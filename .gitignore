@@ -1,4 +1,5 @@
 .venv/
+.codex/config.toml
 __pycache__/
 *.pyc
 .DS_Store

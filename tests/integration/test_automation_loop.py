@@ -28,6 +28,7 @@ from athlete_growth.application.check_in.service import CheckInService
 from athlete_growth.application.ingest.service import IngestionService
 from athlete_growth.application.report.service import ReportService
 from athlete_growth.domain.athlete import AthleteProfile
+from athlete_growth.domain.records import CanonicalRecord
 from athlete_growth.domain.safety import RiskLevel
 from athlete_growth.ports.data_source import (
     HealthStatus,
@@ -156,6 +157,47 @@ class AutomaticTrainingLoopTests(unittest.TestCase):
                 created_at=self.clock(),
             )
         )
+
+    def test_new_activity_in_approved_plan_week_prompts_review(self) -> None:
+        self.add_profile()
+        self.add_subscription("watch")
+        self.records.save(
+            CanonicalRecord.create(
+                athlete_id="athlete-001",
+                kind="training-plan",
+                occurred_at=self.clock(),
+                data={
+                    "plan_id": "synthetic-plan",
+                    "goal_id": "synthetic-goal",
+                    "version": 1,
+                    "status": "approved",
+                    "start_date": "2026-10-26",
+                    "sessions": [],
+                },
+            )
+        )
+        connector = MutableConnector(
+            "watch",
+            (
+                _record(
+                    "watch",
+                    "activity",
+                    "new-training",
+                    occurred_at=datetime(2026, 10, 26, 9, tzinfo=UTC),
+                    activity_type="running",
+                    duration_seconds=1800,
+                ),
+            ),
+        )
+        loop = self.loop({"watch": connector})
+        loop.run_once()
+        notice = self.automation.list_unread("athlete-001")[0]
+        self.assertEqual(notice.priority, "actionable")
+        self.assertEqual(notice.title, "Training plan needs review")
+        self.assertIn("Review possible session matches", notice.body)
+        self.clock.now += timedelta(minutes=30)
+        loop.run_once()
+        self.assertEqual(len(self.automation.list_unread("athlete-001")), 1)
 
     def add_subscription(
         self,

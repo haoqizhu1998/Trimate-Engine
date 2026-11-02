@@ -3,11 +3,15 @@ from __future__ import annotations
 import json
 import unittest
 from contextlib import redirect_stdout
+from datetime import UTC, date, datetime
 from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from athlete_growth.adapters.storage import ProfileRegistry, SQLiteRecordStore, VaultLayout
+from athlete_growth.application.ingest.service import IngestionResult, IngestionService
+from athlete_growth.domain.records import CanonicalRecord, EvidenceRef
 from athlete_growth.interfaces.cli import main as cli_main
 
 FIXTURES = Path(__file__).parents[1] / "fixtures"
@@ -19,6 +23,56 @@ class CLIWorkflowTests(unittest.TestCase):
         with redirect_stdout(output):
             exit_code = cli_main.main(arguments)
         return exit_code, output.getvalue()
+
+    def test_activity_detail_backfill_is_a_noop_without_garmin_activities(self) -> None:
+        with TemporaryDirectory() as directory:
+            home = Path(directory) / "home"
+            code, _ = self.run_command([
+                "init", "--name", "Demo Athlete", "--timezone", "Asia/Shanghai",
+                "--data-home", str(home),
+            ])
+            self.assertEqual(code, 0)
+            code, output = self.run_command([
+                "sync", "--backfill-existing", "--data-home", str(home)
+            ])
+            self.assertEqual(code, 0)
+            result = json.loads(output)
+            self.assertEqual(result["chunks"], 0)
+            self.assertEqual(result["activity_detail_coverage"]["summary_only"], 0)
+
+    def test_activity_detail_backfill_uses_existing_activity_dates(self) -> None:
+        with TemporaryDirectory() as directory:
+            home = Path(directory) / "home"
+            code, _ = self.run_command([
+                "init", "--name", "Demo Athlete", "--timezone", "Asia/Shanghai",
+                "--data-home", str(home),
+            ])
+            self.assertEqual(code, 0)
+            athlete_id = ProfileRegistry(home / "config.toml").default_profile_id()
+            assert athlete_id is not None
+            store = SQLiteRecordStore(VaultLayout(home, athlete_id).database_file)
+            stored = CanonicalRecord.create(
+                athlete_id=athlete_id,
+                kind="activity",
+                occurred_at=datetime(2022, 3, 4, 23, 0, tzinfo=UTC),
+                data={"calendar_date": "2022-03-05", "sport": "running"},
+                evidence=(EvidenceRef("garmin-cn", "42", datetime.now(UTC)),),
+            )
+            store.save(stored)
+            with (
+                patch("athlete_growth.interfaces.cli.commands.GarminCnConnector"),
+                patch.object(
+                    IngestionService, "sync_chunked",
+                    return_value=IngestionResult(0, 0, 0, 0, 0),
+                ) as sync,
+            ):
+                code, output = self.run_command([
+                    "sync", "--backfill-existing", "--data-home", str(home)
+                ])
+            self.assertEqual(code, 0)
+            window = sync.call_args.args[1]
+            self.assertEqual((window.start, window.end), (date(2022, 3, 5), date(2022, 3, 5)))
+            self.assertEqual(json.loads(output)["activity_detail_coverage"]["summary_only"], 1)
 
     def test_local_training_workflow_from_import_to_plan_and_export(self) -> None:
         with TemporaryDirectory() as directory:

@@ -1,0 +1,161 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1536" height="1024" viewBox="0 0 1536 1024" role="img" aria-labelledby="title desc">
+  <title id="title">AI 训练伙伴产品架构流程图</title>
+  <desc id="desc">白板风格的四列架构图：产品工具、执行循环、技能与规则、用户成长与决策。成长决策位于技能与规则右侧，执行反馈进入成长决策，用户确认后更新长期个人画像。</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M1 1 L9 5 L1 9" fill="none" stroke="#242424" stroke-width="1.7" stroke-linejoin="round"/></marker>
+    <marker id="purple-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M1 1 L9 5 L1 9" fill="none" stroke="#743e9d" stroke-width="1.7" stroke-linejoin="round"/></marker>
+    <style>
+      text { font-family: "HanziPen SC", "Kaiti SC", "PingFang SC", sans-serif; fill:#202020 }
+      .title { font-size:54px; font-weight:700; fill:#c51f20 }
+      .subtitle { font-size:28px; font-weight:700; fill:#126246 }
+      .heading { font-size:28px; font-weight:700 }
+      .body { font-size:20px; font-weight:600 }
+      .small { font-size:17px }
+      .red { fill:#ae2c22 }
+      .purple { fill:#743e9d }
+      .orange { fill:#a45f0c }
+      .blue { fill:#155fa9 }
+      .panel-purple { fill:#fff; stroke:#743e9d; stroke-width:3; stroke-dasharray:9 6; rx:9 }
+      .panel-orange { fill:#fff; stroke:#bd690e; stroke-width:3; stroke-dasharray:10 6; rx:9 }
+      .panel-blue { fill:#f9fcff; stroke:#176fc4; stroke-width:4; rx:9 }
+      .box { fill:#fff; stroke:#222; stroke-width:2.6; rx:6 }
+      .orange-box { fill:#fff; stroke:#d76d0d; stroke-width:2.5; rx:5 }
+      .green-box { fill:#fff; stroke:#167e52; stroke-width:3; rx:6 }
+      .flow { fill:none; stroke:#252525; stroke-width:2.6; stroke-linecap:round; stroke-linejoin:round; marker-end:url(#arrow) }
+      .purple-flow { fill:none; stroke:#743e9d; stroke-width:2.4; stroke-dasharray:8 6; stroke-linejoin:round; marker-end:url(#purple-arrow) }
+    </style>
+  </defs>
+
+  <rect x="9" y="9" width="1518" height="1006" rx="18" fill="#fffefa" stroke="#707070" stroke-width="6"/>
+  <rect x="22" y="22" width="1492" height="980" rx="10" fill="none" stroke="#bdbdbd" stroke-width="2"/>
+  <text x="768" y="84" text-anchor="middle" class="title">AI 训练伙伴 · 产品架构流程图</text>
+  <text x="768" y="130" text-anchor="middle" class="subtitle">从用户意图到训练决策与成长反馈</text>
+
+  <!-- Conversation context and primary entry -->
+  <rect class="panel-purple" x="55" y="173" width="273" height="128"/>
+  <text x="191" y="208" text-anchor="middle" class="heading purple">会话上下文（短期）</text>
+  <rect class="box" x="72" y="228" width="239" height="52"/>
+  <text x="191" y="260" text-anchor="middle" class="small">本轮问题与临时澄清</text>
+  <path class="purple-flow" d="M328 245 H523"/>
+
+  <rect class="green-box" x="615" y="157" width="300" height="49"/>
+  <text x="765" y="190" text-anchor="middle" class="body">用户输入</text>
+  <path class="flow" d="M765 207 V222"/>
+  <rect class="box" x="521" y="226" width="488" height="52"/>
+  <text x="765" y="260" text-anchor="middle" class="body">模型宿主：Codex / WorkBuddy / Coze</text>
+  <path class="flow" d="M765 279 V291"/>
+  <rect class="box" x="550" y="295" width="430" height="70"/>
+  <text x="765" y="323" text-anchor="middle" class="body">常驻训练伙伴 Agent</text>
+  <text x="765" y="350" text-anchor="middle" class="small">意图识别 · 风险优先 · 任务规划</text>
+
+  <!-- Long-term portrait: confirmed updates only -->
+  <rect class="panel-purple" x="1238" y="103" width="247" height="240"/>
+  <text x="1361" y="137" text-anchor="middle" class="heading purple">个人画像（长期）</text>
+  <rect class="box" x="1258" y="154" width="207" height="72"/>
+  <text x="1361" y="183" text-anchor="middle" class="small">基础画像：</text>
+  <text x="1361" y="208" text-anchor="middle" class="small">目标与偏好</text>
+  <rect class="box" x="1258" y="242" width="207" height="77"/>
+  <text x="1361" y="273" text-anchor="middle" class="small">成长画像：</text>
+  <text x="1361" y="299" text-anchor="middle" class="small">反馈与已批准适应</text>
+  <path class="purple-flow" d="M1236 255 H1012"/>
+
+  <!-- Four middle columns -->
+  <rect class="panel-orange" x="54" y="381" width="287" height="343"/>
+  <text x="197" y="416" text-anchor="middle" class="heading orange">产品工具</text>
+  <rect class="orange-box" x="77" y="433" width="241" height="47"/>
+  <text x="197" y="464" text-anchor="middle" class="body">同步与数据质量</text>
+  <rect class="orange-box" x="77" y="488" width="241" height="47"/>
+  <text x="197" y="519" text-anchor="middle" class="body">日报 / 周报</text>
+  <rect class="orange-box" x="77" y="543" width="241" height="47"/>
+  <text x="197" y="574" text-anchor="middle" class="body">目标与计划</text>
+  <rect class="orange-box" x="77" y="598" width="241" height="47"/>
+  <text x="197" y="629" text-anchor="middle" class="body">恢复 / 补给 / 赛事</text>
+  <rect class="orange-box" x="77" y="653" width="241" height="47"/>
+  <text x="197" y="684" text-anchor="middle" class="body">训练决策与反馈</text>
+
+  <path class="flow" d="M630 366 V378"/>
+  <rect class="panel-blue" x="380" y="380" width="355" height="344"/>
+  <text x="558" y="415" text-anchor="middle" class="heading blue">执行循环</text>
+  <rect class="box" x="420" y="434" width="275" height="45"/>
+  <text x="558" y="464" text-anchor="middle" class="body">识别意图与风险</text>
+  <path class="flow" d="M558 480 V488"/>
+  <rect class="box" x="420" y="491" width="275" height="45"/>
+  <text x="558" y="521" text-anchor="middle" class="body">按需选择 Skill</text>
+  <path class="flow" d="M558 537 V545"/>
+  <rect class="box" x="420" y="548" width="275" height="45"/>
+  <text x="558" y="578" text-anchor="middle" class="body">选择产品能力</text>
+  <path class="flow" d="M558 594 V602"/>
+  <rect class="box" x="420" y="605" width="275" height="45"/>
+  <text x="558" y="635" text-anchor="middle" class="body">经 MCP 调用工具</text>
+  <path class="flow" d="M558 651 V659"/>
+  <rect class="box" x="420" y="662" width="275" height="45"/>
+  <text x="558" y="692" text-anchor="middle" class="body">观察结果并复核</text>
+  <path class="flow" d="M378 550 H343"/>
+
+  <rect class="panel-purple" x="770" y="389" width="309" height="335"/>
+  <text x="925" y="426" text-anchor="middle" class="heading purple">技能与规则</text>
+  <rect class="box" x="791" y="447" width="267" height="108"/>
+  <text x="925" y="480" text-anchor="middle" class="body">场景 Skill：工作方法</text>
+  <text x="925" y="522" text-anchor="middle" class="small">场景化的技能与方法选择</text>
+  <rect class="box" x="791" y="570" width="267" height="128"/>
+  <text x="925" y="606" text-anchor="middle" class="body">领域规则：计算与安全约束</text>
+  <text x="925" y="643" text-anchor="middle" class="small">规则校验 · 证据要求</text>
+  <text x="925" y="669" text-anchor="middle" class="small">安全边界</text>
+  <path class="purple-flow" d="M768 550 H738"/>
+
+  <rect class="panel-purple" x="1110" y="389" width="345" height="335"/>
+  <text x="1283" y="426" text-anchor="middle" class="heading purple">用户成长与决策</text>
+  <rect class="box" x="1145" y="449" width="275" height="52"/>
+  <text x="1283" y="483" text-anchor="middle" class="body">用户实际执行与反馈</text>
+  <path class="flow" d="M1283 502 V511"/>
+  <rect class="box" x="1145" y="514" width="275" height="52"/>
+  <text x="1283" y="548" text-anchor="middle" class="body">证据评估</text>
+  <path class="flow" d="M1283 567 V576"/>
+  <rect class="box" x="1145" y="579" width="275" height="52"/>
+  <text x="1283" y="613" text-anchor="middle" class="body">适应候选</text>
+  <path class="flow" d="M1283 632 V641"/>
+  <rect class="box" x="1145" y="644" width="275" height="52"/>
+  <text x="1283" y="678" text-anchor="middle" class="body">用户确认</text>
+  <path class="purple-flow" d="M1081 550 H1108"/>
+  <path class="purple-flow" d="M1361 387 V345"/>
+  <text x="1361" y="367" text-anchor="middle" class="small purple">确认后更新成长画像</text>
+
+  <!-- Completion and user-facing outputs -->
+  <path class="flow" d="M558 726 L660 747"/>
+  <polygon points="765,728 875,764 765,800 655,764" fill="#fff" stroke="#242424" stroke-width="3"/>
+  <text x="765" y="771" text-anchor="middle" class="body">任务完成？</text>
+  <path class="flow" d="M876 764 H1053 V716 H1078"/>
+  <text x="979" y="750" text-anchor="middle" class="small red">否：继续迭代或澄清</text>
+  <path class="flow" d="M765 801 V811"/>
+  <text x="787" y="817" class="small" fill="#167e52">是</text>
+  <rect class="green-box" x="605" y="816" width="320" height="46"/>
+  <text x="765" y="846" text-anchor="middle" class="body">面向用户的结果</text>
+  <path class="flow" d="M765 863 V875"/>
+  <path d="M435 879 H1137" fill="none" stroke="#242424" stroke-width="2.5"/>
+  <path class="flow" d="M435 879 V886"/><path class="flow" d="M660 879 V886"/>
+  <path class="flow" d="M887 879 V886"/><path class="flow" d="M1137 879 V886"/>
+  <rect class="box" x="371" y="889" width="140" height="47"/>
+  <text x="441" y="919" text-anchor="middle" class="small">解释与建议</text>
+  <rect class="box" x="548" y="889" width="224" height="47"/>
+  <text x="660" y="919" text-anchor="middle" class="small">计划 / 决策草案</text>
+  <rect class="box" x="788" y="889" width="199" height="47"/>
+  <text x="887" y="919" text-anchor="middle" class="small">确认后保存</text>
+  <rect class="box" x="1004" y="889" width="164" height="47"/>
+  <text x="1086" y="919" text-anchor="middle" class="small">后续提醒</text>
+  <path class="purple-flow" d="M1169 913 H1474 V475 H1458"/>
+  <text x="1304" y="900" text-anchor="middle" class="small purple">后续执行反馈</text>
+
+  <!-- Independent data flow, compressed along the bottom -->
+  <rect class="panel-orange" x="43" y="947" width="1450" height="61"/>
+  <text x="65" y="970" class="small orange">数据与外部生态（独立于对话运行）</text>
+  <text x="80" y="995" class="small">Garmin / 第三方</text>
+  <path class="flow" d="M234 988 H262"/>
+  <text x="272" y="995" class="small">API / 外部 MCP / 文件</text>
+  <path class="flow" d="M491 988 H519"/>
+  <text x="530" y="995" class="small">标准化 · 去重 · 质量校验</text>
+  <path class="flow" d="M776 988 H804"/>
+  <text x="814" y="995" class="small">用户私有数据库</text>
+  <path class="flow" d="M995 988 H1023"/>
+  <text x="1034" y="995" class="small">变化触发分析与通知</text>
+  <path class="flow" d="M903 946 V936 H197 V726"/>
+</svg>
