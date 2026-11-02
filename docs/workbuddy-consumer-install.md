@@ -2,7 +2,7 @@
 
 ## 唯一交付文件
 
-给朋友发送 `dist/consumer/Trimate-V1.2.0.zip`。版本号来自 `packaging/release-version.txt`；下一版会生成 `Trimate-VX.Y.Z.zip`。构建脚本验证新包完整性后，只保留当前版本的 Trimate ZIP。
+给朋友发送 [GitHub 预览发布页](https://github.com/haoqizhu1998/Trimate-Engine/releases/tag/V1.2.0)的 `Trimate-V1.2.0.zip`；本地构建时位于 `dist/consumer/`。版本号来自 `packaging/release-version.txt`；下一版会生成 `Trimate-VX.Y.Z.zip`。构建脚本验证新包完整性后，只保留当前版本的 Trimate ZIP。
 
 朋友把 ZIP 作为附件发送到支持本机文件与命令的 WorkBuddy 或 GPT/Codex 本地 Work 对话，再说“开始使用 Trimate”。`00-请AI先读.md` 是 AI 入口；`product/` 包含常驻 Agent、17 个场景 Skill 和能力清单。AI 先运行本机自动安装入口：建立默认空档案，配置当前宿主的 MCP，随后核验工具是否真的加载。压缩包没有个人数据或设备凭据，不能仅凭附件声称已连接佳明、高驰或开启自动同步。
 

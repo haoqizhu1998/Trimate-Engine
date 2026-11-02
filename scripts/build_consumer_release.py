@@ -93,6 +93,8 @@ def build_release(output: Path, wheel: Path | None = None) -> dict[str, Path]:
 
         consumer = stage / f"Trimate-{tag}-macOS-安装包"
         consumer.mkdir()
+        for name in ("LICENSE", "NOTICE"):
+            shutil.copy2(ROOT / name, consumer / name)
         shutil.copy2(wheel, consumer / wheel.name)
         shutil.copy2(generic / "agent.md", consumer / "Trimate常驻指令.md")
         shutil.copy2(ROOT / "packaging" / "common" / "bootstrap-local.py", consumer)
@@ -116,6 +118,8 @@ def build_release(output: Path, wheel: Path | None = None) -> dict[str, Path]:
         shutil.copy2(ROOT / "packaging" / "connectors" / "coros-cn-mcp.json", consumer)
         windows = stage / f"Trimate-{tag}-Windows-安装包"
         windows.mkdir()
+        for name in ("LICENSE", "NOTICE"):
+            shutil.copy2(ROOT / name, windows / name)
         shutil.copy2(wheel, windows / wheel.name)
         shutil.copy2(generic / "agent.md", windows / "Trimate常驻指令.md")
         shutil.copy2(ROOT / "packaging" / "common" / "bootstrap-local.py", windows)
@@ -143,6 +147,8 @@ def build_release(output: Path, wheel: Path | None = None) -> dict[str, Path]:
         # while web-only hosts can use the same Agent/Skill material in chat.
         ai = stage / "ai-conversation"
         ai.mkdir()
+        for name in ("LICENSE", "NOTICE"):
+            shutil.copy2(ROOT / name, ai / name)
         for name in ("00-请AI先读.md", "00-给用户看.md"):
             shutil.copy2(ROOT / "packaging" / "common" / name, ai / name)
         shutil.copy2(ROOT / "packaging" / "common" / "宿主连接.md", ai / "宿主连接.md")

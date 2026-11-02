@@ -103,6 +103,12 @@ class WorkBuddyReleaseTests(unittest.TestCase):
             self.assertEqual(list(bundle.parent.iterdir()), [bundle])
             with zipfile.ZipFile(bundle) as archive:
                 names = set(archive.namelist())
+                for path in (
+                    "LICENSE", "NOTICE",
+                    "install/macOS/LICENSE", "install/macOS/NOTICE",
+                    "install/Windows/LICENSE", "install/Windows/NOTICE",
+                ):
+                    self.assertIn(path, names)
                 self.assertIn("00-请AI先读.md", names)
                 self.assertIn("00-给用户看.md", names)
                 self.assertIn("宿主连接.md", names)
