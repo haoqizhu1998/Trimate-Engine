@@ -364,7 +364,7 @@ class AutomaticTrainingLoop:
         persisted_snapshots = self.automation_repository.list_snapshots_for_change_set(
             change_set.change_set_id
         )
-        algorithm_version = "wellness-report/1.0"
+        algorithm_version = "wellness-report/1.1"
         persisted_by_identity = {
             (snapshot.analysis_kind, snapshot.period, snapshot.algorithm_version): snapshot
             for snapshot in persisted_snapshots

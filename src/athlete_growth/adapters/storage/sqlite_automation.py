@@ -1631,7 +1631,7 @@ class SQLiteAutomationRepository:
         *,
         created_at: datetime,
         analysis_kind: str = "wellness",
-        algorithm_version: str = "wellness-report/1.0",
+        algorithm_version: str = "wellness-report/1.1",
         run_id: str | None = None,
         lease_token: str | None = None,
         lease_owner: str | None = None,

@@ -367,7 +367,7 @@ class AutomaticTrainingLoopTests(unittest.TestCase):
         snapshots = self.automation.list_snapshots("athlete-001")
         self.assertEqual({item.analysis_kind for item in snapshots}, {"daily", "weekly"})
         daily = next(item for item in snapshots if item.analysis_kind == "daily")
-        self.assertEqual(daily.algorithm_version, "wellness-report/1.0")
+        self.assertEqual(daily.algorithm_version, "wellness-report/1.1")
         self.assertEqual(daily.risk_level, "low")
         unread = self.automation.list_unread("athlete-001")
         self.assertEqual(len(unread), 1)

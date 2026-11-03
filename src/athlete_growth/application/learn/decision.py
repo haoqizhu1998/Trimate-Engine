@@ -85,6 +85,7 @@ class GrowthDecisionService:
             "risk_level": report.safety.level.value,
             "risk_reasons": list(report.safety.reasons),
             "safety_actions": list(report.safety.actions),
+            "hrv_context": dict(report.hrv_context or {}),
             "data_gaps": list(report.data_gaps),
             "confidence": report.confidence,
             "evidence_ids": list(

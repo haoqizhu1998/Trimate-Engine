@@ -2,7 +2,7 @@
 name: body-assessment
 description: Use when an amateur runner, road cyclist, or triathlete asks for a current body or training-state assessment, whether they are improving, plateauing, declining, overloaded, ready to add training, or should recover. Also use before a major training-plan change when a fresh readiness decision is needed.
 metadata:
-  version: "1.0.0"
+  version: "1.1.0"
   categories:
     - running
     - cycling
@@ -15,6 +15,7 @@ metadata:
 # 耐力运动身体状态评估
 
 跨跑步、公路车、游泳和铁三的共同判断遵守 `../../docs/endurance-training-methodology.md`：能力、负荷、恢复和疼痛必须多指标解释，ACWR、CTL、设备恢复分数或单次表现都不能单独裁决。
+夜间 HRV 仅作为恢复线索；日报给出的七天与前 21 天均值差异不是佳明个人基线，也不能单独证明当日可加量。使用前读取 `../../docs/hrv-recovery-methodology.md`。
 
 ## 使用边界
 

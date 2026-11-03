@@ -33,7 +33,7 @@ class TrainingAnalyticsTests(unittest.TestCase):
         self.assertEqual(first.metrics["sessions_7d"], 2)
         self.assertIsNone(first.metrics["hr_drift_pct"])
         self.assertIn("heart-rate drift", first.data_gaps)
-        self.assertEqual(first.algorithm_version, "training-analytics/1.1")
+        self.assertEqual(first.algorithm_version, "training-analytics/1.2")
 
     def test_builds_personal_recovery_baselines_without_treating_missing_as_zero(self) -> None:
         as_of = datetime(2026, 10, 26, 12, 0, tzinfo=UTC)
@@ -52,7 +52,7 @@ class TrainingAnalyticsTests(unittest.TestCase):
                     athlete_id="athlete-001",
                     kind="hrv",
                     occurred_at=as_of - timedelta(days=1),
-                    data={"hrv": 62},
+                    data={"hrv": 62, "last_night_avg_ms": 62},
                 ),
                 CanonicalRecord.create(
                     athlete_id="athlete-001",
@@ -73,9 +73,20 @@ class TrainingAnalyticsTests(unittest.TestCase):
 
         self.assertEqual(result.metrics["resting_hr_baseline_28d"], 52.0)
         self.assertEqual(result.metrics["hrv_baseline_28d"], 62.0)
+        self.assertEqual(result.metrics["hrv_overnight_mean_28d"], 62.0)
         self.assertEqual(result.metrics["sleep_hours_baseline_28d"], 7.5)
         self.assertEqual(result.metrics["weight_kg_latest"], 70.2)
         self.assertNotIn("resting heart rate baseline", result.data_gaps)
+
+    def test_legacy_weekly_fallback_is_excluded_from_overnight_mean(self) -> None:
+        as_of = datetime(2026, 10, 26, 12, tzinfo=UTC)
+        legacy = CanonicalRecord.create(
+            athlete_id="a", kind="hrv", occurred_at=as_of,
+            data={"hrv": 52, "weekly_avg_ms": 52},
+        )
+        result = service.TrainingAnalytics().analyze([legacy], as_of=as_of)
+        self.assertIsNone(result.metrics["hrv_overnight_mean_28d"])
+        self.assertIn("HRV baseline", result.data_gaps)
 
     def test_high_intensity_percentage_cannot_exceed_one_hundred(self) -> None:
         as_of = datetime(2026, 10, 26, 12, 0, tzinfo=UTC)

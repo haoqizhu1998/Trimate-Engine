@@ -647,11 +647,20 @@ def _canonical_payload(kind: str, payload: dict[str, object]) -> dict[str, JsonV
         )
     if kind == "hrv":
         summary = _object(payload.get("hrvSummary")) or payload
+        last_night = _first_number(summary, "lastNightAvg")
+        if last_night is not None and not 0 < last_night <= 500:
+            last_night = None
+        weekly = _first_number(summary, "weeklyAvg")
+        if weekly is not None and not 0 < weekly <= 500:
+            weekly = None
         return cast(
             dict[str, JsonValue],
             {
                 "calendar_date": _scalar(summary.get("calendarDate")),
-                "hrv": _first_number(summary, "lastNightAvg", "weeklyAvg", "hrv"),
+                # A rolling weekly average is not an overnight observation.
+                "hrv": last_night,
+                "last_night_avg_ms": last_night,
+                "weekly_avg_ms": weekly,
             },
         )
     if kind == "heart-rate":

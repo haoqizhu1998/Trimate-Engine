@@ -2,7 +2,7 @@
   "schema_version": 1,
   "agent": {
     "id": "athlete-training-partner",
-    "version": "1.7.0",
+    "version": "1.8.0",
     "source": "agent.md",
     "minimum_capability_version": "1.18"
   },
@@ -21,7 +21,7 @@
     },
     {
       "id": "athlete-daily-review",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "source": "skills/athlete-daily-review/SKILL.md",
       "required_tools": [
         "get_sync_status",
@@ -88,7 +88,7 @@
     },
     {
       "id": "athlete-decision-coach",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "source": "skills/athlete-decision-coach/SKILL.md",
       "required_tools": [
         "get_today_report",
@@ -117,7 +117,7 @@
     },
     {
       "id": "body-assessment",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "source": "skills/body-assessment/SKILL.md",
       "required_tools": [
         "get_today_report",

@@ -7,6 +7,7 @@ from datetime import UTC, date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 from athlete_growth.application.analyze.service import TrainingAnalytics
+from athlete_growth.application.report.hrv import overnight_hrv_context
 from athlete_growth.domain.analytics import AnalysisResult
 from athlete_growth.domain.records import CanonicalRecord, JsonValue
 from athlete_growth.domain.safety import SafetyAssessment, SafetyRules
@@ -23,7 +24,8 @@ class WellnessReport:
     evidence_ids: tuple[str, ...]
     data_gaps: tuple[str, ...]
     confidence: float
-    algorithm_version: str = "wellness-report/1.0"
+    hrv_context: dict[str, JsonValue] | None = None
+    algorithm_version: str = "wellness-report/1.1"
 
 
 class ReportService:
@@ -62,6 +64,7 @@ class ReportService:
             calendar_date - timedelta(days=6), time.min, tzinfo=self.timezone
         ).astimezone(UTC)
         history = self._records(start=history_start, end=end)
+        hrv_context = overnight_hrv_context(history, on=calendar_date, timezone=self.timezone)
         analytics = self.analytics.analyze(
             history,
             as_of=end,
@@ -79,6 +82,11 @@ class ReportService:
                 for evidence in record.evidence
             )
         )
+        hrv_evidence = hrv_context["evidence_ids"]
+        assert isinstance(hrv_evidence, list)
+        evidence = tuple(
+            dict.fromkeys((*evidence, *(item for item in hrv_evidence if isinstance(item, str))))
+        )
         gaps = list(analytics.data_gaps) + list(safety.data_gaps)
         if not objective_records:
             gaps.append("objective daily summary")
@@ -92,6 +100,7 @@ class ReportService:
             evidence,
             tuple(dict.fromkeys(gaps)),
             confidence,
+            hrv_context,
         )
 
     def weekly(self, end_date: date) -> WellnessReport:
@@ -104,8 +113,10 @@ class ReportService:
         history_start = datetime.combine(
             end_date - timedelta(days=27), time.min, tzinfo=self.timezone
         ).astimezone(UTC)
+        history = self._records(start=history_start, end=end)
+        hrv_context = overnight_hrv_context(history, on=end_date, timezone=self.timezone)
         analytics = self.analytics.analyze(
-            self._records(start=history_start, end=end),
+            history,
             as_of=end,
             history_start=history_start,
             acute_start=start,
@@ -133,6 +144,11 @@ class ReportService:
                 item.raw_hash or record.record_id for record in records for item in record.evidence
             )
         )
+        hrv_evidence = hrv_context["evidence_ids"]
+        assert isinstance(hrv_evidence, list)
+        evidence = tuple(
+            dict.fromkeys((*evidence, *(item for item in hrv_evidence if isinstance(item, str))))
+        )
         gaps = list(analytics.data_gaps) + list(safety.data_gaps)
         return WellnessReport(
             f"{start_date.isoformat()}/{end_date.isoformat()}",
@@ -143,6 +159,7 @@ class ReportService:
             evidence,
             tuple(dict.fromkeys(gaps)),
             analytics.confidence,
+            hrv_context,
         )
 
     def _records(self, *, start: datetime, end: datetime) -> list[CanonicalRecord]:

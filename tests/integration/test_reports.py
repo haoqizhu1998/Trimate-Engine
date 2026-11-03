@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import unittest
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -58,6 +58,28 @@ class ReportServiceTests(unittest.TestCase):
 
             self.assertEqual(report.objective["steps"], 9000)
             self.assertNotIn("objective daily summary", report.data_gaps)
+
+    def test_daily_report_exposes_typed_overnight_hrv_separately_from_sleep(self) -> None:
+        on = date(2026, 10, 26)
+        with TemporaryDirectory() as directory:
+            store = SQLiteRecordStore(Path(directory) / "athlete.sqlite3")
+            for days_ago in range(28):
+                night = on - timedelta(days=days_ago)
+                store.save(
+                    CanonicalRecord.create(
+                        athlete_id="athlete-001", kind="hrv",
+                        occurred_at=datetime(night.year, night.month, night.day, tzinfo=UTC),
+                        data={"calendar_date": night.isoformat(),
+                              "last_night_avg_ms": 48 if days_ago < 7 else 60},
+                    )
+                )
+            report = service.ReportService("athlete-001", store).daily(on)
+
+        assert report.hrv_context is not None
+        self.assertEqual(report.hrv_context["recent_vs_prior_pct"], -20.0)
+        self.assertEqual(report.hrv_context["latest_night_date"], on.isoformat())
+        self.assertNotIn("hrv", report.objective)
+        self.assertEqual(report.safety.level, RiskLevel.UNKNOWN)
 
     def test_weekly_period_is_exactly_seven_athlete_local_dates(self) -> None:
         with TemporaryDirectory() as directory:

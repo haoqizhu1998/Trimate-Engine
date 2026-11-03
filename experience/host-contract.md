@@ -6,6 +6,7 @@
 |---|---|---|
 | `endurance-athlete-assessment` | `get_profile_summary`, `list_goals`, `get_sport_baseline` | 可渐进式询问与解读；无能力快照写入工具 |
 | `body-assessment` | `get_today_report`, `get_recent_check_ins`, `get_training_load_context`, `get_sport_baseline` | 可基于已有证据评估；没有六周专项趋势和结构化评估保存时，不声称已有或已保存 |
+| `athlete-daily-review` | `get_sync_status`, `get_today_report`, `get_weekly_report`, `list_activities`, `list_notifications` | 日报与周报含独立的夜间 HRV 数值对比；不凭 HRV 单独判定当日准备度或自动改课 |
 | `injury-risk` | `get_today_report`, `assess_return_to_training` | 非诊断性解释；症状资料不足时询问，安全结果优先 |
 | `training-load` | `get_training_load_context`, `get_recent_check_ins`, `get_today_report` | 设备负荷和明确 RPE 分口径；当前无 `training_loads` 写入、TSS/疲劳代理计算或自动风险等级 |
 | `workout-feedback` | `get_activity_detail`, `analyze_session`, `get_recent_check_ins`, `get_today_report`, `list_training_plans`, `list_plan_execution`, `compare_plan_actual`, `preview_plan_execution`, `confirm_plan_execution` | 可解释活动、同距离分圈前后对比和相似历史参考；计划课与活动只生成候选，用户核对后才可确认执行状态、RPE 与疼痛。无自动完成判定、逐点样本分析、逐段评估写入或 `ai_feedback` 写入 |

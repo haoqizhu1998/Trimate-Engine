@@ -90,6 +90,27 @@ class GrowthDecisionLoopTests(unittest.TestCase):
                     effect="same",
                 )
 
+    def test_hrv_trend_is_context_and_does_not_override_safe_options(self) -> None:
+        with TemporaryDirectory() as temporary:
+            athlete_id, records, growth = self._init(Path(temporary) / "vault")
+            now = datetime(2026, 10, 27, 8, tzinfo=UTC)
+            for days_ago in range(28):
+                night = now - timedelta(days=days_ago)
+                records.save(CanonicalRecord.create(
+                    athlete_id=athlete_id, kind="hrv", occurred_at=night,
+                    data={"calendar_date": night.date().isoformat(),
+                          "last_night_avg_ms": 40 if days_ago < 7 else 60},
+                ))
+            self._check_in(records, athlete_id, now, pain=0)
+            service = GrowthDecisionService(
+                athlete_id, records, growth, timezone_name="UTC", clock=lambda: now
+            )
+            preview = service.preview_decision()
+
+        self.assertEqual(preview["risk_level"], "low")
+        self.assertEqual(preview["hrv_context"]["recent_vs_prior_pct"], -33.3)
+        self.assertIn("usual", [item["id"] for item in preview["options"]])
+
     def test_repeated_feedback_requires_user_approval_before_adaptation(self) -> None:
         with TemporaryDirectory() as temporary:
             athlete_id, records, growth = self._init(Path(temporary) / "vault")

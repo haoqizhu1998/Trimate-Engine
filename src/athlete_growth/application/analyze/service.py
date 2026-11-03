@@ -11,7 +11,7 @@ from athlete_growth.domain.records import CanonicalRecord
 
 
 class TrainingAnalytics:
-    algorithm_version = "training-analytics/1.1"
+    algorithm_version = "training-analytics/1.2"
 
     def analyze(
         self,
@@ -51,7 +51,9 @@ class TrainingAnalytics:
         resting_hr = self._values(
             window_records, {"daily-summary", "heart-rate"}, ("resting_hr", "restingHeartRate")
         )
-        hrv = self._values(window_records, {"hrv"}, ("hrv", "hrv_ms", "lastNightAvg"))
+        # Legacy `hrv` values may have been filled from Garmin's weekly average.
+        # Only explicitly typed overnight values are comparable day by day.
+        hrv = self._values(window_records, {"hrv"}, ("last_night_avg_ms",))
         sleep_hours = self._values(
             window_records,
             {"sleep"},
@@ -86,6 +88,7 @@ class TrainingAnalytics:
             "hr_drift_pct": round(mean(drift_values), 2) if drift_values else None,
             "resting_hr_baseline_28d": round(mean(resting_hr), 2) if resting_hr else None,
             "hrv_baseline_28d": round(mean(hrv), 2) if hrv else None,
+            "hrv_overnight_mean_28d": round(mean(hrv), 2) if hrv else None,
             "sleep_hours_baseline_28d": round(mean(sleep_hours), 2) if sleep_hours else None,
             "body_battery_baseline_28d": round(mean(body_battery), 2) if body_battery else None,
             "weight_kg_latest": round(max(weight_values)[1], 2) if weight_values else None,

@@ -311,7 +311,7 @@ class AnalysisSnapshot:
     risk_level: str
     created_at: datetime
     analysis_kind: str = "wellness"
-    algorithm_version: str = "wellness-report/1.0"
+    algorithm_version: str = "wellness-report/1.1"
     _report_json: str = field(init=False, repr=False)
 
     def __post_init__(self) -> None:

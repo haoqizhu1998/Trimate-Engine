@@ -43,7 +43,8 @@ _READ_TOOLS: dict[str, tuple[str, dict[str, object]]] = {
     ),
     "get_today_report": (
         "Read the athlete's evidence-backed daily training and wellness report. "
-        "Use this for today's advice; explain uncertainty and safety flags.",
+        "Includes descriptive overnight HRV context when available; never use HRV "
+        "alone as training clearance. Explain uncertainty and safety flags.",
         {
             "date": {
                 "type": "string",

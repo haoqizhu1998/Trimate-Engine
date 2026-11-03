@@ -423,6 +423,25 @@ class GarminCnSessionGatewayTests(unittest.TestCase):
 
         self.assertEqual(sleep.canonical_payload["sleep_seconds"], 28000)
         self.assertEqual(hrv.canonical_payload["hrv"], 61)
+        self.assertEqual(hrv.canonical_payload["last_night_avg_ms"], 61)
+
+    def test_does_not_relabel_weekly_hrv_as_last_night(self) -> None:
+        hrv = connector.GarminCnConnector._to_raw(
+            {
+                "kind": "hrv",
+                "source_id": "2026-10-26:hrv:0",
+                "occurred_at": "2026-10-26T00:00:00+08:00",
+                "payload": {
+                    "hrvSummary": {
+                        "calendarDate": "2026-10-26",
+                        "weeklyAvg": 52,
+                    }
+                },
+            }
+        )
+        self.assertIsNone(hrv.canonical_payload["hrv"])
+        self.assertIsNone(hrv.canonical_payload["last_night_avg_ms"])
+        self.assertEqual(hrv.canonical_payload["weekly_avg_ms"], 52)
 
     def test_treats_negative_vendor_intensity_sentinel_as_missing(self) -> None:
         activity = connector.GarminCnConnector._to_raw(
