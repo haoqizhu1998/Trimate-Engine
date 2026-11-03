@@ -338,6 +338,12 @@ def execute(args) -> dict[str, object]:
             safety=report.safety,
             start_date=args.start_date,
         )
+        if not plan.sessions:
+            return {
+                "blocked": True,
+                "reason": plan.change_reason,
+                "saved": False,
+            }
         TrainingPlanner().save(plan, runtime.store)
         return asdict(plan)
     if args.command == "plan-list":

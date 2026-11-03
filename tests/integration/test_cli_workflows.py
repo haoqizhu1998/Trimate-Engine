@@ -24,6 +24,35 @@ class CLIWorkflowTests(unittest.TestCase):
             exit_code = cli_main.main(arguments)
         return exit_code, output.getvalue()
 
+    def test_high_risk_cli_plan_is_not_saved(self) -> None:
+        with TemporaryDirectory() as directory:
+            home = Path(directory) / "home"
+            self.run_command([
+                "init", "--name", "Synthetic Athlete", "--timezone", "UTC",
+                "--data-home", str(home),
+            ])
+            _, goal_output = self.run_command([
+                "goal-add", "--type", "race", "--title", "Synthetic 10K",
+                "--priority", "3", "--deadline", "2027-05-01",
+                "--data-home", str(home),
+            ])
+            goal_id = json.loads(goal_output)["goal_id"]
+            self.run_command([
+                "check-in", "--at", "2027-01-01T08:00:00+00:00",
+                "--fatigue", "7", "--soreness", "5", "--pain", "8",
+                "--mood", "4", "--motivation", "4", "--rpe", "7",
+                "--data-home", str(home),
+            ])
+            _, output = self.run_command([
+                "plan-create", "--goal-id", goal_id,
+                "--start-date", "2027-01-01", "--available", "4:60",
+                "--max-weekly-minutes", "60", "--sport", "running",
+                "--data-home", str(home),
+            ])
+            self.assertEqual(json.loads(output)["blocked"], True)
+            _, plans = self.run_command(["plan-list", "--data-home", str(home)])
+            self.assertEqual(json.loads(plans)["plans"], [])
+
     def test_activity_detail_backfill_is_a_noop_without_garmin_activities(self) -> None:
         with TemporaryDirectory() as directory:
             home = Path(directory) / "home"

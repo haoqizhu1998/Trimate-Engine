@@ -19,7 +19,7 @@ from athlete_growth.ports.repositories import CanonicalRecordRepository
 
 
 class TrainingPlanner:
-    algorithm_version = "training-planner/1.2"
+    algorithm_version = "training-planner/1.3"
 
     def generate(
         self,
@@ -31,6 +31,16 @@ class TrainingPlanner:
         start_date: date,
         recent_sessions: tuple[tuple[str, int, date], ...] = (),
     ) -> TrainingPlan:
+        if safety.level == RiskLevel.HIGH:
+            return TrainingPlan(
+                self._digest(athlete_id, goal.goal_id, start_date.isoformat(), "blocked"),
+                athlete_id,
+                goal.goal_id,
+                1,
+                datetime.now(UTC),
+                (),
+                change_reason="high-risk safety assessment; no training prescribed",
+            )
         recent = [item for item in recent_sessions if 0 < (start_date - item[2]).days <= 28]
         observed_longest = {
             sport: max(
@@ -148,9 +158,7 @@ class TrainingPlanner:
             if duration <= 0:
                 continue
             intensity = (
-                "rest"
-                if safety.level == RiskLevel.HIGH
-                else "quality"
+                "quality"
                 if session_type == "quality"
                 else "easy"
             )
@@ -174,7 +182,7 @@ class TrainingPlanner:
                     duration,
                     intensity,
                     objective,
-                    0.0 if safety.level == RiskLevel.HIGH else float(duration),
+                    float(duration),
                     session_type=session_type,
                 )
             )
@@ -202,6 +210,7 @@ class TrainingPlanner:
                 sessions.append(
                     replace(
                         session,
+                        duration_min=0,
                         intensity="rest",
                         objective="Recovery and reassessment; no training load prescribed.",
                         expected_load=0,

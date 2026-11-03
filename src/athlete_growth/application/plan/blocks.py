@@ -165,13 +165,19 @@ def add_progression_envelope(
             ceiling = min(maximum, max(1, round(current * 0.8)))
         else:
             phase = "build_forecast"
-            current = min(maximum, max(current, round(current * 1.05)))
             ceiling = current
         enriched.append({
             **raw,
             "phase": phase,
             "weekly_ceiling_min": ceiling,
-            "ceiling_basis": "first-week observed-duration preview; conservative heuristic",
+            "ceiling_basis": (
+                "provisional phase reduction from first-week observed-duration preview"
+                if phase in {"event_week_review", "taper_forecast", "recovery_forecast"}
+                else "hold first-week observed-duration ceiling until new evidence is reviewed"
+            ),
+            "phase_reduction_is_heuristic": phase in {
+                "event_week_review", "taper_forecast", "recovery_forecast"
+            },
             "requires_fresh_evidence_and_confirmation": index > 0,
         })
     return {
@@ -180,6 +186,8 @@ def add_progression_envelope(
         "goal_deadline": goal_deadline.isoformat() if goal_deadline else None,
         "progression_interpretation": (
             "Forecast ceilings are planning guardrails, not prescribed load or injury clearance. "
-            "Future sessions require fresh activity, subjective state and a new confirmed preview."
+            "No automatic volume increase is forecast. "
+            "Phase reductions are provisional heuristics; "
+            "future sessions require fresh activity, subjective state and a new confirmed preview."
         ),
     }

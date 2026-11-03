@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import unittest
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from athlete_growth.application.performance import EndurancePerformanceService
 from athlete_growth.domain.records import CanonicalRecord
@@ -79,6 +79,43 @@ class EndurancePerformanceTests(unittest.TestCase):
         self.assertEqual(context["sports"][0]["sessions_7d"], 1)
         self.assertIsNone(context["sports"][0]["load_ratio"])
         self.assertNotIn(self.foreign.record_id, str(context))
+
+    def test_similar_sessions_use_only_prior_comparable_quality_checked_history(self) -> None:
+        current = CanonicalRecord.create(
+            athlete_id="a", kind="activity",
+            occurred_at=datetime(2026, 10, 26, tzinfo=UTC),
+            data={"sport": "running", "duration_min": 50, "distance_m": 10000},
+        )
+        peers = [
+            CanonicalRecord.create(
+                athlete_id="a", kind="activity",
+                occurred_at=current.occurred_at - timedelta(days=offset),
+                data={"sport": "running", "duration_min": minutes, "distance_m": 10000},
+            )
+            for offset, minutes in ((7, 49), (14, 50), (21, 51))
+        ]
+        excluded = CanonicalRecord.create(
+            athlete_id="a", kind="activity",
+            occurred_at=current.occurred_at - timedelta(days=3),
+            data={"sport": "running", "duration_min": 90, "distance_m": 10000},
+        )
+        future = CanonicalRecord.create(
+            athlete_id="a", kind="activity",
+            occurred_at=current.occurred_at + timedelta(days=1),
+            data={"sport": "running", "duration_min": 40, "distance_m": 10000},
+        )
+        result = EndurancePerformanceService(
+            "a", MemoryRecords([current, *peers, excluded, future]),
+            now=datetime(2026, 10, 27, tzinfo=UTC),
+        ).analyze_session(current.record_id)["similar_sessions"]
+        self.assertEqual(result["status"], "descriptive")
+        self.assertEqual(result["sample_count"], 3)
+        self.assertEqual(result["median"], 5.0)
+        self.assertEqual(result["current"], 5.0)
+        self.assertEqual(result["difference_percent"], 0.0)
+        self.assertNotIn(excluded.record_id, result["evidence_ids"])
+        self.assertNotIn(future.record_id, result["evidence_ids"])
+        self.assertIn("not controlled", " ".join(result["limitations"]))
 
     def test_explicit_plan_actual_comparison_does_not_claim_completion(self) -> None:
         plan = CanonicalRecord.create(

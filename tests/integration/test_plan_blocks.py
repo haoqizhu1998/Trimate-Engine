@@ -85,6 +85,11 @@ class PlanBlockTests(unittest.TestCase):
             ["running", "cycling", "running", "cycling", "running"],
         )
         self.assertTrue(all(week["status"] == "forecast_only" for week in cycle["forecast"][1:]))
+        first_ceiling = cycle["forecast"][0]["weekly_ceiling_min"]
+        self.assertEqual(cycle["forecast"][1]["weekly_ceiling_min"], first_ceiling)
+        self.assertEqual(cycle["forecast"][2]["weekly_ceiling_min"], first_ceiling)
+        self.assertTrue(cycle["forecast"][3]["phase_reduction_is_heuristic"])
+        self.assertIn("No automatic volume increase", cycle["progression_interpretation"])
         self.assertEqual(self.records.list_current("athlete-1", kind="training-plan"), [])
         first = self.workflow.confirm_plan(str(preview["preview_id"]), 2)["plan"]
         self.assertEqual(first["block_week_index"], 0)

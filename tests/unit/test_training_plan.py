@@ -53,8 +53,8 @@ class TrainingPlanTests(unittest.TestCase):
             start_date=date(2026, 10, 26),
         )
 
-        self.assertTrue(all(session.expected_load == 0 for session in plan.sessions))
-        self.assertTrue(all(session.intensity == "rest" for session in plan.sessions))
+        self.assertEqual(plan.sessions, ())
+        self.assertIn("no training prescribed", plan.change_reason)
 
     def test_multisport_allocation_uses_each_requested_discipline(self) -> None:
         constraints = models.TrainingConstraints(

@@ -531,12 +531,14 @@ class PlanningWorkflow:
         if event_day is not None:
             assumptions.append(
                 "Race week is a reduced-volume preview; the event day is reserved for a separate "
-                "race strategy and is not counted as a training session."
+                "race strategy and is not counted as a training session. The provisional 60% "
+                "ceiling is a product heuristic, not an individualized taper prescription."
             )
         elif taper_week:
             assumptions.append(
                 "The week before the race uses a provisional 80% volume ceiling and no key "
-                "quality or long session; recheck against current training and recovery."
+                "quality or long session. This is a product heuristic; recheck against the "
+                "event, recent training and recovery."
             )
         if constraints.use_saved_preferences and saved_preference["record_id"] is not None:
             assumptions.append(

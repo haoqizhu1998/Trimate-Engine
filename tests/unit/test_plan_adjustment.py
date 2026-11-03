@@ -33,6 +33,7 @@ class PlanAdjustmentTests(unittest.TestCase):
         self.assertEqual(adjusted.version, 2)
         self.assertEqual(adjusted.previous_plan_id, original.plan_id)
         self.assertTrue(all(session.expected_load == 0 for session in adjusted.sessions))
+        self.assertTrue(all(session.duration_min == 0 for session in adjusted.sessions))
         self.assertTrue(any(session.expected_load > 0 for session in original.sessions))
 
     def test_writeback_requires_explicit_confirmation(self) -> None:

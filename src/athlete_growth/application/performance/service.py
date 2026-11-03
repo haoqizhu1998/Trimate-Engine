@@ -147,6 +147,7 @@ class EndurancePerformanceService:
         }
 
     def analyze_session(self, record_id: str) -> dict[str, object]:
+        record = self._current("activity", record_id)
         detail = self.get_activity_detail(record_id)
         metrics = detail["metrics"]
         assert isinstance(metrics, dict)
@@ -177,16 +178,109 @@ class EndurancePerformanceService:
             raw_gaps.append(
                 "segment disciplines and transitions are required; no overall pace is calculated"
             )
+        detail_sync = detail["detail_sync"]
+        assert isinstance(detail_sync, dict)
+        if detail_sync.get("recorded_sample_count", 0):
+            raw_gaps = detail["data_gaps"]
+            assert isinstance(raw_gaps, list)
+            raw_gaps.append("recorded samples are cached but not yet analyzed point by point")
         return {
             "record_id": record_id,
             "sport": sport,
             "summary": summary,
             "lap_splits": lap_results,
+            "similar_sessions": self._similar_sessions(record, sport, summary),
             "metrics": metrics,
             "quality_flags": detail["quality_flags"],
             "data_gaps": detail["data_gaps"],
             "evidence": {"record_id": record_id, "source_count": detail["source_count"]},
             "interpretation": "descriptive only; no threshold, race prediction or causal claim",
+        }
+
+    def _similar_sessions(
+        self,
+        record: CanonicalRecord,
+        sport: str,
+        current_metrics: dict[str, float],
+    ) -> dict[str, object]:
+        """Describe prior sessions with similar exposure, without claiming fitness change."""
+        metric = {
+            "running": "pace_min_per_km",
+            "cycling": "speed_km_per_hour",
+            "swimming": "pace_min_per_100m",
+        }.get(sport)
+        duration = _number(record.data, "duration_min")
+        distance = _number(record.data, "distance_m")
+        empty: dict[str, object] = {
+            "status": "insufficient",
+            "sample_count": 0,
+            "metric": metric,
+            "current": current_metrics.get(metric) if metric else None,
+            "median": None,
+            "difference_percent": None,
+            "evidence_ids": [],
+            "limitations": ["effort, terrain and weather are not controlled"],
+        }
+        if metric is None or duration is None or distance is None or not current_metrics:
+            return {**empty, "limitations": ["comparable sport, duration or distance unavailable"]}
+        if record.quality_flags:
+            return {**empty, "limitations": ["current activity has quality flags"]}
+        peers: list[tuple[CanonicalRecord, float]] = []
+        for candidate in self.records.list_current(self.athlete_id, kind="activity"):
+            if (
+                candidate.record_id == record.record_id
+                or candidate.quality_flags
+                or not record.occurred_at - timedelta(days=180)
+                <= candidate.occurred_at < record.occurred_at
+                or normalize_sport(candidate.data.get("sport")) != sport
+                or candidate.data.get("sport") != record.data.get("sport")
+            ):
+                continue
+            candidate_duration = _number(candidate.data, "duration_min")
+            candidate_distance = _number(candidate.data, "distance_m")
+            if (
+                candidate_duration is None
+                or candidate_distance is None
+                or not 0.8 <= candidate_duration / duration <= 1.2
+                or not 0.8 <= candidate_distance / distance <= 1.2
+            ):
+                continue
+            current_type = record.data.get("session_type")
+            candidate_type = candidate.data.get("session_type")
+            if current_type and candidate_type and current_type != candidate_type:
+                continue
+            value = _performance_metrics(sport, candidate_duration, candidate_distance)
+            if metric in value:
+                peers.append((candidate, value[metric]))
+        peers.sort(key=lambda item: item[0].occurred_at, reverse=True)
+        peers = peers[:20]
+        if len(peers) < 3:
+            return {
+                **empty,
+                "sample_count": len(peers),
+                "evidence_ids": [item.record_id for item, _ in peers],
+                "limitations": ["fewer than three comparable prior sessions"],
+            }
+        return {
+            "status": "descriptive",
+            "sample_count": len(peers),
+            "metric": metric,
+            "current": current_metrics[metric],
+            "median": round(median(value for _, value in peers), 3),
+            "difference_percent": round(
+                (current_metrics[metric] / median(value for _, value in peers) - 1) * 100,
+                2,
+            ),
+            "evidence_ids": [item.record_id for item, _ in peers],
+            "selection": (
+                "up to 20 most recent, same source sport; prior 180 days; "
+                "duration and distance within 20%"
+            ),
+            "limitations": [
+                "effort, terrain and weather are not controlled",
+                "difference is current metric minus reference median; for pace, lower is faster",
+                "this is not a threshold, fitness trend or race prediction",
+            ],
         }
 
     def get_sport_baseline(self, sport: str, *, days: int = 90) -> dict[str, object]:

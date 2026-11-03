@@ -8,9 +8,9 @@
 | `body-assessment` | `get_today_report`, `get_recent_check_ins`, `get_training_load_context`, `get_sport_baseline` | 可基于已有证据评估；没有六周专项趋势和结构化评估保存时，不声称已有或已保存 |
 | `injury-risk` | `get_today_report`, `assess_return_to_training` | 非诊断性解释；症状资料不足时询问，安全结果优先 |
 | `training-load` | `get_training_load_context`, `get_recent_check_ins`, `get_today_report` | 设备负荷和明确 RPE 分口径；当前无 `training_loads` 写入、TSS/疲劳代理计算或自动风险等级 |
-| `workout-feedback` | `get_activity_detail`, `analyze_session`, `get_recent_check_ins`, `get_today_report`, `compare_plan_actual` | 可解释现有活动；无手动训练写入、步骤评估写入、自动计划匹配或 `ai_feedback` 写入 |
+| `workout-feedback` | `get_activity_detail`, `analyze_session`, `get_recent_check_ins`, `get_today_report`, `list_training_plans`, `list_plan_execution`, `compare_plan_actual`, `preview_plan_execution`, `confirm_plan_execution` | 可解释活动和同条件历史参考；计划课与活动只生成候选，用户核对后才可确认执行状态、RPE 与疼痛。无自动完成判定、逐点样本分析、逐段评估写入或 `ai_feedback` 写入 |
 | `weekly-review` | `get_weekly_report`, `get_training_load_context`, `get_recent_check_ins`, `list_training_plans` | 可做已有证据的周复盘；缺计划与实际逐项关联时不计算完成率 |
-| `training-plan` | `get_today_report`, `get_training_load_context`, `list_goals`, `get_training_preferences`, `preview_plan`, `preview_plan_blocks`, `review_plan`, `preview_plan_adjustment`, `preview_plan_update`, `confirm_plan` | 支持私有偏好、七天草案、2–12 周重点轮换预测、同周单节课的保守改动预览与版本确认；活动与课表差异只是待用户核对的候选。自动渐进周期处方、完整执行归因、调整撤销流程尚无对应执行工具 |
+| `training-plan` | `get_today_report`, `get_training_load_context`, `get_sport_calibration`, `list_goals`, `list_training_plans`, `get_training_preferences`, `preview_plan`, `preview_plan_blocks`, `list_plan_execution`, `review_plan`, `preview_plan_adjustment`, `preview_plan_update`, `confirm_plan` | 支持私有偏好、七天草案、2–12 周重点轮换预测、同周单节课的保守改动预览与版本确认；新活动与课表关系须由用户核对。未来周不自动加量；较轻周和赛前周的减量比例仍为待复核启发式。完整逐日专项周期处方和结构化步骤尚未执行 |
 | `training-nutrition-coach` | `get_today_report`, `preview_fueling_plan`, `preview_fueling_logistics` | 当前仅支持一般训练/比赛补给预览；无饮食日志、餐单、能量账本写入 |
 | `periodic-training-summary` | `get_periodic_training_summary`, `render_periodic_training_poster` | 从当前用户私有库按日历周期汇总；可输出 PNG 海报，缺失计划关联时不计算完成率；不走 OpenClaw 投递 |
 | `training-memory` | `preview_training_memory`, `confirm_training_memory`, `list_training_memory`, `get_training_preferences`, `preview_training_preferences`, `confirm_training_preferences` | 自由文本偏好笔记不自动转为排课参数；结构化偏好经预览/确认后写入私有画像。部分身体状态不等于完整 Check-in，也不自动解除安全限制 |
