@@ -150,7 +150,7 @@
     },
     {
       "id": "workout-feedback",
-      "version": "0.8.0",
+      "version": "0.9.0",
       "source": "skills/workout-feedback/SKILL.md",
       "required_tools": [
         "get_activity_detail",
@@ -181,7 +181,7 @@
     },
     {
       "id": "training-plan",
-      "version": "1.13.0",
+      "version": "1.14.0",
       "source": "skills/training-plan/SKILL.md",
       "required_tools": [
         "get_today_report",

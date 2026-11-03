@@ -101,7 +101,8 @@ class PlanBlockTests(unittest.TestCase):
         update = self.workflow.preview_plan_update(plan_id=str(first["plan_id"]))
         self.assertEqual(update["block_week_index"], 1)
         self.assertEqual(update["planning_context"]["constraints"]["focus_sport"], "cycling")
-        self.assertGreater(update["summary"]["key_sessions"], 0)
+        self.assertEqual(update["summary"]["key_sessions"], 0)
+        self.assertEqual(update["planning_context"]["baseline_mode"], "restart_or_unknown")
         self.assertTrue(
             all(
                 session["sport"] == "cycling"

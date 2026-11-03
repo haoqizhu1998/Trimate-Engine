@@ -53,6 +53,34 @@ class CLIWorkflowTests(unittest.TestCase):
             _, plans = self.run_command(["plan-list", "--data-home", str(home)])
             self.assertEqual(json.loads(plans)["plans"], [])
 
+    def test_cli_plan_uses_recent_activity_baseline(self) -> None:
+        with TemporaryDirectory() as directory:
+            home = Path(directory) / "home"
+            self.run_command([
+                "init", "--name", "Synthetic Athlete", "--timezone", "UTC",
+                "--data-home", str(home),
+            ])
+            athlete_id = ProfileRegistry(home / "config.toml").default_profile_id()
+            assert athlete_id is not None
+            store = SQLiteRecordStore(VaultLayout(home, athlete_id).database_file)
+            store.save(CanonicalRecord.create(
+                athlete_id=athlete_id, kind="activity",
+                occurred_at=datetime(2026, 10, 25, 8, tzinfo=UTC),
+                data={"sport": "road_running", "duration_min": 20},
+            ))
+            _, goal_output = self.run_command([
+                "goal-add", "--type", "sport", "--title", "Consistency",
+                "--priority", "3", "--data-home", str(home),
+            ])
+            _, output = self.run_command([
+                "plan-create", "--goal-id", json.loads(goal_output)["goal_id"],
+                "--start-date", "2026-10-27", "--available", "1:60,3:60",
+                "--max-weekly-minutes", "120", "--sport", "running",
+                "--data-home", str(home),
+            ])
+            plan = json.loads(output)
+            self.assertLessEqual(sum(item["duration_min"] for item in plan["sessions"]), 20)
+
     def test_activity_detail_backfill_is_a_noop_without_garmin_activities(self) -> None:
         with TemporaryDirectory() as directory:
             home = Path(directory) / "home"

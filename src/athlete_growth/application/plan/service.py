@@ -19,7 +19,7 @@ from athlete_growth.ports.repositories import CanonicalRecordRepository
 
 
 class TrainingPlanner:
-    algorithm_version = "training-planner/1.3"
+    algorithm_version = "training-planner/1.4"
 
     def generate(
         self,
@@ -41,25 +41,31 @@ class TrainingPlanner:
                 (),
                 change_reason="high-risk safety assessment; no training prescribed",
             )
-        recent = [item for item in recent_sessions if 0 < (start_date - item[2]).days <= 28]
+        recent = [
+            item for item in recent_sessions
+            if item[0] in constraints.allowed_sports
+            and item[1] > 0
+            and 0 < (start_date - item[2]).days <= 28
+        ]
+        latest_week = [item for item in recent if (start_date - item[2]).days <= 7]
+        latest_sports = {sport for sport, _, _ in latest_week}
+        recent_exposure = [item for item in recent if (start_date - item[2]).days <= 14]
         observed_longest = {
             sport: max(
-                (minutes for logged_sport, minutes, _ in recent if logged_sport == sport), default=0
+                (minutes for logged_sport, minutes, _ in recent_exposure
+                 if logged_sport == sport), default=0
+            )
+            for sport in constraints.allowed_sports
+        }
+        older_longest = {
+            sport: max(
+                (minutes for logged_sport, minutes, _ in recent if logged_sport == sport),
+                default=0,
             )
             for sport in constraints.allowed_sports
         }
         # The user-provided maximum is a ceiling, never a target to fill.
-        weekly_history = [
-            sum(
-                minutes
-                for _, minutes, day in recent
-                if start_date - timedelta(days=7 * (week + 1))
-                <= day
-                < start_date - timedelta(days=7 * week)
-            )
-            for week in range(4)
-        ]
-        observed_ceiling = max(weekly_history, default=0)
+        observed_minutes_7d = sum(minutes for _, minutes, _ in latest_week)
         available_days = sum(
             1
             for offset in range(7)
@@ -70,8 +76,14 @@ class TrainingPlanner:
             )
             > 0
         )
-        provisional_ceiling = 45 * available_days
-        remaining = min(constraints.max_weekly_minutes, observed_ceiling or provisional_ceiling)
+        sparse_baseline = not latest_week
+        provisional_session_limit = min(
+            available_days, max(2, min(3, len(constraints.allowed_sports)))
+        )
+        remaining = min(
+            constraints.max_weekly_minutes,
+            30 * provisional_session_limit if sparse_baseline else observed_minutes_7d,
+        )
         sessions: list[PlannedSession] = []
         sports = constraints.allowed_sports
         focus = constraints.focus_sport or sports[0]
@@ -97,7 +109,9 @@ class TrainingPlanner:
             ),
             None,
         )
-        can_key = safety.level == RiskLevel.LOW and observed_longest.get(focus, 0) > 0
+        can_key = safety.level == RiskLevel.LOW and any(
+            sport == focus for sport, _, _ in latest_week
+        )
         if not can_key or (
             long_date and quality_date and abs((long_date - quality_date).days) <= 1
         ):
@@ -106,6 +120,8 @@ class TrainingPlanner:
             long_date = None
         key_dates = {day for day in (quality_date, long_date) if day is not None}
         for offset in range(7):
+            if sparse_baseline and len(sessions) >= provisional_session_limit:
+                break
             session_date = start_date + timedelta(days=offset)
             weekday = session_date.weekday()
             if weekday in constraints.unavailable_weekdays:
@@ -132,7 +148,11 @@ class TrainingPlanner:
                 else sports[len(sessions) % len(sports)]
             )
             # Do not prescribe an unobserved long session from availability alone.
-            exposure_cap = observed_longest.get(sport, 0) or 45
+            exposure_cap = (
+                observed_longest[sport]
+                if sport in latest_sports
+                else min(30, older_longest.get(sport, 0) or 30)
+            )
             reserve = sum(
                 min(
                     constraints.available_minutes_by_weekday.get(day.weekday(), 0),
@@ -201,6 +221,10 @@ class TrainingPlanner:
             1,
             datetime.now(UTC),
             tuple(sessions),
+            change_reason=(
+                "provisional restart or unknown baseline; short easy sessions only"
+                if sparse_baseline else "initial plan"
+            ),
         )
 
     def adjust(self, plan: TrainingPlan, *, safety: SafetyAssessment, reason: str) -> TrainingPlan:

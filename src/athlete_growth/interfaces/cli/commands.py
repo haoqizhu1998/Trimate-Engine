@@ -11,6 +11,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, cast
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from athlete_growth.adapters.coros import (
     CorosConnector,
@@ -38,6 +39,7 @@ from athlete_growth.application.data_quality import inspect_records
 from athlete_growth.application.data_rights import DataRightsService
 from athlete_growth.application.ingest import IngestionService
 from athlete_growth.application.nutrition import NutritionPlanner
+from athlete_growth.application.performance.service import normalize_sport
 from athlete_growth.application.plan import TrainingPlanner
 from athlete_growth.application.race import RaceStrategyService
 from athlete_growth.application.recovery import ReturnToTrainingService
@@ -331,12 +333,29 @@ def execute(args) -> dict[str, object]:
             runtime.store,
             timezone_name=runtime.timezone_name,
         ).daily(args.start_date)
+        local_timezone = ZoneInfo(runtime.timezone_name)
+        recent_sessions: list[tuple[str, int, date]] = []
+        for activity in runtime.store.list_current(runtime.athlete_id, kind="activity"):
+            activity_day = activity.occurred_at.astimezone(local_timezone).date()
+            if (
+                activity.quality_flags
+                or normalize_sport(activity.data.get("sport")) != args.sport
+                or not 0 < (args.start_date - activity_day).days <= 28
+            ):
+                continue
+            try:
+                minutes = int(float(str(activity.data.get("duration_min", 0))))
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if minutes > 0:
+                recent_sessions.append((args.sport, minutes, activity_day))
         plan = TrainingPlanner().generate(
             athlete_id=runtime.athlete_id,
             goal=goals[args.goal_id],
             constraints=constraints,
             safety=report.safety,
             start_date=args.start_date,
+            recent_sessions=tuple(recent_sessions),
         )
         if not plan.sessions:
             return {

@@ -189,12 +189,80 @@ class EndurancePerformanceService:
             "sport": sport,
             "summary": summary,
             "lap_splits": lap_results,
+            "lap_pacing_pattern": self._lap_pacing_pattern(
+                sport,
+                lap_results,
+                quality_flags=record.quality_flags,
+                truncated=bool(detail["laps_truncated"]),
+                session_type=record.data.get("session_type"),
+            ),
             "similar_sessions": self._similar_sessions(record, sport, summary),
             "metrics": metrics,
             "quality_flags": detail["quality_flags"],
             "data_gaps": detail["data_gaps"],
             "evidence": {"record_id": record_id, "source_count": detail["source_count"]},
             "interpretation": "descriptive only; no threshold, race prediction or causal claim",
+        }
+
+    @staticmethod
+    def _lap_pacing_pattern(
+        sport: str,
+        laps: list[dict[str, JsonValue]],
+        *,
+        quality_flags: tuple[str, ...],
+        truncated: bool,
+        session_type: JsonValue | None,
+    ) -> dict[str, object]:
+        """Compare balanced split groups only when lap distances are near equal."""
+        metric = {
+            "running": "pace_min_per_km",
+            "cycling": "speed_km_per_hour",
+            "swimming": "pace_min_per_100m",
+        }.get(sport)
+        insufficient: dict[str, object] = {
+            "status": "insufficient",
+            "metric": metric,
+            "lap_count": len(laps),
+            "first_half_median": None,
+            "second_half_median": None,
+            "difference_percent": None,
+        }
+        if metric is None or quality_flags or truncated:
+            return {**insufficient, "reason": "sport, quality or lap coverage is unsuitable"}
+        if isinstance(session_type, str) and session_type in {
+            "quality", "interval", "recovery"
+        }:
+            return {**insufficient, "reason": "structured or recovery laps are not comparable"}
+        if len(laps) < 4 or len(laps) % 2:
+            return {**insufficient, "reason": "at least four paired laps are required"}
+        distances = [_number(lap, "distance_m") for lap in laps]
+        durations = [_number(lap, "duration_min") for lap in laps]
+        if any(value is None or value <= 0 for value in (*distances, *durations)):
+            return {**insufficient, "reason": "lap distance or duration is missing"}
+        valid_distances = [float(value) for value in distances if value is not None]
+        typical = median(valid_distances)
+        if any(not 0.8 <= value / typical <= 1.2 for value in valid_distances):
+            return {**insufficient, "reason": "lap distances differ by more than 20%"}
+        values = [
+            _performance_metrics(sport, duration, distance)[metric]
+            for duration, distance in zip(durations, distances, strict=True)
+        ]
+        half = len(values) // 2
+        first = median(values[:half])
+        second = median(values[half:])
+        return {
+            "status": "descriptive",
+            "metric": metric,
+            "lap_count": len(values),
+            "first_half_median": round(first, 3),
+            "second_half_median": round(second, 3),
+            "difference_percent": round((second / first - 1) * 100, 2),
+            "selection": "equal count of first and second laps, each within 20% of median distance",
+            "limitations": [
+                "lap averages do not identify interval steps, pauses or terrain changes",
+                "difference is second-half minus first-half; for pace, higher is slower",
+                "within-session split pattern is not a fitness trend or diagnosis",
+            ],
         }
 
     def _similar_sessions(

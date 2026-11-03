@@ -83,6 +83,32 @@ class PlanningWorkflowTests(unittest.TestCase):
         self.assertTrue(all(item["status"] == "approved" for item in saved[0].data["sessions"]))
         self.assertEqual(self.workflow.list_open_drafts()["drafts"], [])
 
+    def test_plan_baseline_normalizes_sport_and_excludes_flagged_activity(self) -> None:
+        goal_id = self._confirmed_goal()
+        self.records.save(
+            CanonicalRecord.create(
+                athlete_id="athlete-1", kind="activity",
+                occurred_at=datetime(2026, 10, 26, 9, tzinfo=UTC),
+                data={"sport": "road_running", "duration_min": 20},
+            )
+        )
+        self.records.save(
+            CanonicalRecord.create(
+                athlete_id="athlete-1", kind="activity",
+                occurred_at=datetime(2026, 10, 26, 10, tzinfo=UTC),
+                data={"sport": "running", "duration_min": 500},
+                quality_flags=("invalid:duration_min",),
+            )
+        )
+        preview = self.workflow.preview_plan(
+            goal_id=goal_id,
+            start_date=date(2026, 10, 27),
+            constraints=self._constraints(),
+        )
+        self.assertEqual(preview["planning_context"]["recent_7d_minutes"], 20)
+        self.assertEqual(preview["planning_context"]["excluded_activity_count"], 1)
+        self.assertLessEqual(preview["summary"]["total_minutes"], 20)
+
     def test_changed_data_invalidates_plan_preview(self) -> None:
         goal_id = self._confirmed_goal()
         preview = self.workflow.preview_plan(

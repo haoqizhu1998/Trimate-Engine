@@ -21,31 +21,27 @@
 | `athlete-onboarding` | 新用户、连接、数据可用性 | 宿主和本机安装状态仍要逐一验收 |
 | `athlete-daily-review` | 解释当日与近期报告 | 只回答“发生了什么”，不代替行动确认 |
 | `endurance-athlete-assessment`、`body-assessment` | 基础画像与当前状态评估 | 能力快照写入和完整六周趋势尚缺工具 |
-| `workout-feedback`、`training-load` | 单次训练反馈与负荷解释 | 当前仅执行已有记录的分析，不自动写入 |
+| `workout-feedback`、`training-load` | 单次训练反馈与负荷解释 | 计划执行、RPE 和疼痛需用户核对、预览与确认后写入 |
 | `injury-risk` | 疼痛与伤病风险信号 | 产品确定性安全结果优先 |
 | `athlete-goal-plan` | 目标草案与确认；基础七天工具入口 | 长期周期化方法由 `training-plan` 承载，当前执行工具尚未覆盖 |
 | `athlete-recovery` | 症状、复训边界、主观 Check-in | 非诊断，缺少 Check-in 视为未知 |
 | `training-nutrition-coach` | 饮食、训练与比赛补给 | 当前只有补给预览工具，没有饮食日志或餐单生成 |
 | `athlete-race-strategy` | 赛事信息、跑步执行策略及用户输入的分项目赛段换算 | 赛段工具不预测成绩或功率目标 |
-| `training-plan`、`weekly-review` | 周期计划方法与周度复盘 | 当前计划工具仍仅支持基础七天草案 |
+| `training-plan`、`weekly-review` | 周期计划方法与周度复盘 | 仅本周为可确认逐日草案；未来周是方向预测，每周重新预览 |
 | `periodic-training-summary`、`running-form-analysis`、`training-memory` | 周期海报、视频分析、训练记忆 | 已接入执行入口；跑姿需本机视觉依赖、模型和本地视频暂存 |
 | `athlete-decision-coach` | 今日选项、执行反馈、受限适应 | 当前选项偏粗，不能自动滚动改写计划 |
 
-当前 MCP 目录有 **40 个工具**，其中 29 个标记为只读或预览，11 个涉及写入或主动同步。按产品用途分组：
+当前 MCP 工具数量随产品版本变化；以运行时 `get_capability_catalog` 为准。以下仅列举代表性入口：
 
-| 类别 | 数量 | 现有工具 |
-|---|---:|---|
-| 入口与档案 | 3 | `get_capability_catalog`, `get_onboarding_status`, `get_profile_summary` |
-| 数据与同步 | 4 | `get_sync_status`, `run_sync_now`, `list_activities`, `get_data_quality` |
-| 报告 | 2 | `get_today_report`, `get_weekly_report` |
-| 单次与专项表现 | 5 | `get_activity_detail`, `analyze_session`, `get_sport_baseline`, `get_training_load_context`, `compare_plan_actual` |
-| 目标与计划 | 7 | `list_goals`, `list_open_planning_drafts`, `propose_goal`, `confirm_goal`, `preview_plan`, `confirm_plan`, `list_training_plans` |
-| 主观状态与恢复 | 4 | `get_recent_check_ins`, `preview_check_in`, `confirm_check_in`, `assess_return_to_training` |
-| 补给与赛事 | 4 | `preview_fueling_plan`, `preview_fueling_logistics`, `preview_race_strategy`, `preview_race_segments` |
-| 反馈与成长决策 | 9 | `list_growth_history`, `analyze_response_samples`, `get_growth_profile`, `preview_training_decision`, `confirm_training_decision`, `list_training_decisions`, `record_decision_outcome`, `confirm_growth_adaptation`, `revoke_growth_adaptation` |
-| 通知 | 2 | `list_notifications`, `mark_notification_read` |
+| 类别 | 代表性工具 |
+|---|---|
+| 入口与数据 | `get_capability_catalog`, `get_onboarding_status`, `get_sync_status`, `list_activities` |
+| 单次与专项表现 | `get_activity_detail`, `analyze_session`, `get_sport_baseline`, `get_training_load_context`, `compare_plan_actual` |
+| 目标与计划 | `propose_goal`, `preview_plan`, `preview_plan_blocks`, `preview_plan_update`, `list_plan_execution`, `preview_plan_execution`, `confirm_plan_execution` |
+| 主观状态与恢复 | `get_recent_check_ins`, `preview_check_in`, `confirm_check_in`, `assess_return_to_training` |
+| 成长与决策 | `get_growth_profile`, `preview_training_decision`, `confirm_training_decision`, `record_decision_outcome` |
 
-这些工具是**产品用例接口**，不等于 40 项成熟的耐力运动分析能力。`list_activities` 返回简要信息；详细活动工具可读取 TCX/FIT 导入的最多 200 个分段，以及存在于记录中的平均功率和踏频，但 Garmin 中国区的摘要同步通常没有分段。工具不读取原始路线，也不凭缺失的字段推断阈值。[实现位置](../src/athlete_growth/interfaces/host/capabilities.py)
+这些工具是**产品用例接口**，不等于同等数量的成熟耐力运动分析能力。`list_activities` 返回简要信息；详细活动工具可读取已入库的最多 200 个分圈，并在至少四个完整、相近距离的圈段时给出前后半程描述性比较。Garmin 中国区已支持详情和分圈同步；逐点样本仍仅在私有原始证据中，未进入对话分析。工具不读取原始路线，也不凭缺失的字段推断阈值。[实现位置](../src/athlete_growth/interfaces/host/capabilities.py)
 
 ## 划分与实现上的主要问题
 

@@ -112,8 +112,9 @@ TOOL_SPECS: dict[str, tuple[str, dict[str, object], tuple[str, ...], bool]] = {
         True,
     ),
     "analyze_session": (
-        "Describe one session and, when available, prior same-sport sessions with similar "
-        "duration and distance. Comparison is descriptive; triathlon has no combined pace.",
+        "Describe one session, balanced comparable lap halves, and prior same-sport "
+        "sessions with similar duration and distance when evidence permits. "
+        "Comparisons are descriptive; triathlon has no combined pace.",
         {"record_id": {"type": "string"}},
         ("record_id",),
         True,

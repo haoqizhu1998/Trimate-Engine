@@ -117,6 +117,43 @@ class EndurancePerformanceTests(unittest.TestCase):
         self.assertNotIn(future.record_id, result["evidence_ids"])
         self.assertIn("not controlled", " ".join(result["limitations"]))
 
+    def test_lap_pacing_pattern_requires_comparable_complete_laps(self) -> None:
+        record = CanonicalRecord.create(
+            athlete_id="a", kind="activity",
+            occurred_at=datetime(2026, 10, 26, tzinfo=UTC),
+            data={
+                "sport": "running", "duration_min": 22, "distance_m": 4000,
+                "laps": [
+                    {"distance_m": 1000, "duration_min": minutes}
+                    for minutes in (5, 5, 6, 6)
+                ],
+            },
+        )
+        pattern = EndurancePerformanceService(
+            "a", MemoryRecords([record])
+        ).analyze_session(record.record_id)["lap_pacing_pattern"]
+        self.assertEqual(pattern["status"], "descriptive")
+        self.assertEqual(pattern["first_half_median"], 5)
+        self.assertEqual(pattern["second_half_median"], 6)
+        self.assertEqual(pattern["difference_percent"], 20)
+
+        uneven = CanonicalRecord.create(
+            athlete_id="a", kind="activity",
+            occurred_at=datetime(2026, 10, 26, tzinfo=UTC),
+            data={
+                "sport": "running", "duration_min": 23, "distance_m": 4500,
+                "laps": [
+                    {"distance_m": distance, "duration_min": minutes}
+                    for distance, minutes in ((1000, 5), (1000, 5), (1000, 6), (1500, 7))
+                ],
+            },
+        )
+        refused = EndurancePerformanceService(
+            "a", MemoryRecords([uneven])
+        ).analyze_session(uneven.record_id)["lap_pacing_pattern"]
+        self.assertEqual(refused["status"], "insufficient")
+        self.assertIn("distances differ", refused["reason"])
+
     def test_explicit_plan_actual_comparison_does_not_claim_completion(self) -> None:
         plan = CanonicalRecord.create(
             athlete_id="a",

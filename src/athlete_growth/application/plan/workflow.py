@@ -510,22 +510,26 @@ class PlanningWorkflow:
             else None
         )
         recent_sessions: list[tuple[str, int, date]] = []
+        excluded_activity_count = 0
         for item in self.records.list_current(self.athlete_id, kind="activity"):
+            activity_day = item.occurred_at.astimezone(self.timezone).date()
+            if not 0 < (start_date - activity_day).days <= 28:
+                continue
+            sport = normalize_sport(item.data.get("sport"))
+            if sport not in constraints.allowed_sports:
+                continue
+            if item.quality_flags:
+                excluded_activity_count += 1
+                continue
             try:
                 minutes = int(float(str(item.data.get("duration_min", 0))))
                 if minutes > 0:
-                    recent_sessions.append(
-                        (
-                            str(item.data.get("sport", "")),
-                            minutes,
-                            item.occurred_at.astimezone(self.timezone).date(),
-                        )
-                    )
-            except (TypeError, ValueError):
+                    recent_sessions.append((sport, minutes, activity_day))
+                else:
+                    excluded_activity_count += 1
+            except (TypeError, ValueError, OverflowError):
+                excluded_activity_count += 1
                 continue
-        recent_sessions = [
-            item for item in recent_sessions if 0 < (start_date - item[2]).days <= 28
-        ]
         observed_sports = {item[0] for item in recent_sessions}
         assumptions = ["Expected load is planned minutes only, not TSS or physiological load."]
         if event_day is not None:
@@ -550,16 +554,32 @@ class PlanningWorkflow:
             assumptions.append(
                 "Focus-block preference is recorded; use preview_plan_blocks to rotate weeks."
             )
+        recent_week = [
+            item for item in recent_sessions if (start_date - item[2]).days <= 7
+        ]
         if not recent_sessions:
             assumptions.append(
-                "No recent training duration was found; preview uses a provisional "
-                "45-minute single-session ceiling."
+                "No recent training duration was found; preview is limited to two short "
+                "easy sessions, or three when three disciplines are requested, with a "
+                "30-minute single-session ceiling. This is a product starting assumption, "
+                "not an individual safety threshold."
+            )
+        elif not recent_week:
+            assumptions.append(
+                "No activity was found in the last seven days. Earlier peak weeks are not "
+                "used to restore training volume; this restart preview is limited to short "
+                "easy sessions with a 30-minute single-session ceiling."
+            )
+        if excluded_activity_count:
+            assumptions.append(
+                "Activities with quality flags or invalid durations were excluded from "
+                "the planning baseline."
             )
         for sport in constraints.allowed_sports:
             if sport not in observed_sports and recent_sessions:
                 assumptions.append(
                     f"No recent {sport} session was found; that sport uses a provisional "
-                    "45-minute single-session ceiling."
+                    "30-minute single-session ceiling."
                 )
         generated = TrainingPlanner().generate(
             athlete_id=self.athlete_id,
@@ -649,6 +669,10 @@ class PlanningWorkflow:
             ],
             "key_session_pattern": saved_values.get("key_session_pattern"),
             "recent_activity_count": len(recent_sessions),
+            "excluded_activity_count": excluded_activity_count,
+            "recent_7d_activity_count": len(recent_week),
+            "recent_7d_minutes": sum(item[1] for item in recent_week),
+            "baseline_mode": "restart_or_unknown" if not recent_week else "recent_week",
             "event_day": event_day.isoformat() if event_day else None,
             "taper_week": taper_week,
             "calibration_record_ids": {
