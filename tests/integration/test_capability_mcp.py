@@ -51,7 +51,10 @@ class CapabilityMCPTests(unittest.TestCase):
                 item for item in catalog["capabilities"]
                 if item["domain"] == "device_connections"
             )
-            self.assertEqual({item["id"] for item in devices["sources"]}, {"garmin-cn", "coros"})
+            self.assertEqual(
+                {item["id"] for item in devices["sources"]},
+                {"garmin-cn", "garmin-global", "coros"},
+            )
             self.assertEqual(
                 next(item for item in devices["sources"] if item["id"] == "coros")[
                     "product_ingestion"

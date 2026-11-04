@@ -328,8 +328,9 @@ class IngestionService:
     def _same_activity_from_other_source(
         existing: CanonicalRecord, candidate: CanonicalRecord, source: str
     ) -> bool:
-        if source not in {"garmin-cn", "coros"} or not any(
-            item.source in {"garmin-cn", "coros"} and item.source != source
+        shared_activity_sources = {"garmin-cn", "garmin-global", "coros"}
+        if source not in shared_activity_sources or not any(
+            item.source in shared_activity_sources and item.source != source
             for item in existing.evidence
         ):
             return False

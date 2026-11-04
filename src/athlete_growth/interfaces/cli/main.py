@@ -84,7 +84,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="configure automatic device-source training updates",
     )
     automation_configure.add_argument(
-        "--source", choices=("garmin-cn", "coros"), default="garmin-cn"
+        "--source", choices=("garmin-cn", "garmin-global", "coros"), default="garmin-cn"
     )
     automation_configure.add_argument("--interval-minutes", type=int, default=30)
     automation_configure.add_argument("--lookback-days", type=int, default=3)
@@ -175,7 +175,9 @@ def _build_parser() -> argparse.ArgumentParser:
     add_home(running_status)
 
     sync_parser = subcommands.add_parser("sync", help="sync a read-only device source")
-    sync_parser.add_argument("--source", choices=("garmin-cn", "coros"), default="garmin-cn")
+    sync_parser.add_argument(
+        "--source", choices=("garmin-cn", "garmin-global", "coros"), default="garmin-cn"
+    )
     sync_parser.add_argument("--start", type=date.fromisoformat)
     sync_parser.add_argument("--end", type=date.fromisoformat)
     sync_parser.add_argument(
@@ -200,6 +202,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "garmin-cn-revoke", help="remove Garmin China credentials"
     )
     add_home(revoke_parser)
+    for action, help_text in (
+        ("connect", "connect an international Garmin account with a hidden Personal API key"),
+        ("status", "check the international Garmin Personal API connection"),
+        ("revoke", "remove the local international Garmin key and bearer token"),
+    ):
+        add_home(subcommands.add_parser(f"garmin-global-{action}", help=help_text))
     for action in ("helper-install", "login-start", "login-finish", "login-status", "revoke"):
         coros_parser = subcommands.add_parser(
             f"coros-{action}", help=f"run local COROS OAuth {action} via the official helper"

@@ -142,7 +142,7 @@ MCP 工具现统一经宿主无关 facade 调用应用用例，不再通过 CLI 
 | 交互与接入 | CLI、版本化能力目录、宿主无关 Python facade、本地 stdio MCP、产品自有 Agent/Skill 源定义与 Codex/通用包构建器 | 跨宿主行为评测、WorkBuddy/Coze 安装适配、统一结果 envelope、HTTP/OpenAPI、Web/App |
 | AI | Provider 端口与显式、可降级解释 | 托管模型编排与宿主级授权体验 |
 
-Garmin 中国区适配器使用本地缓存会话和非官方 Garmin Connect 接口，不是官方商业集成。它声明 `read_only=True`、`supports_write=False` 和 `delivery_mode="poll"`。
+Garmin 中国区适配器使用本地缓存会话和非官方 Garmin Connect 接口，不是官方商业集成。佳明国际区适配器使用用户自建的官方 Personal API Key，Key 与短期令牌独立存于本机私有目录；Personal API 仅供个人自用。两个来源均声明 `read_only=True`、`supports_write=False` 和 `delivery_mode="poll"`。
 
 ## 10. 数据与研发边界
 

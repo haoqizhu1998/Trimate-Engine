@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import getpass
 import sys
-from dataclasses import asdict, dataclass, is_dataclass
+from dataclasses import asdict, dataclass, is_dataclass, replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from enum import Enum
@@ -25,6 +25,7 @@ from athlete_growth.adapters.garmin_cn.connector import (
     activity_detail_coverage,
     known_activity_summaries,
 )
+from athlete_growth.adapters.garmin_global import GarminGlobalConnector
 from athlete_growth.adapters.races import RaceFileConnector
 from athlete_growth.adapters.storage import (
     ProfileRegistry,
@@ -163,21 +164,24 @@ def execute(args) -> dict[str, object]:
             return {"source": "coros", "start": args.start.isoformat(),
                     "end": args.end.isoformat(), **asdict(result)}
         activity_records = runtime.store.list_current(runtime.athlete_id, kind="activity")
+        source = args.source
         if args.backfill_existing:
             if args.start is not None or args.end is not None:
                 raise ValueError("--backfill-existing cannot be combined with dates")
             pending = [
                 record for record in activity_records
                 if record.data.get("detail_status") != "complete"
-                and any(item.source == "garmin-cn" for item in record.evidence)
+                and any(item.source == source for item in record.evidence)
             ]
             if not pending:
                 return {
-                    "source": "garmin-cn",
+                    "source": source,
                     "chunks": 0,
                     "inserted": 0,
                     "updated": 0,
-                    "activity_detail_coverage": activity_detail_coverage(activity_records),
+                    "activity_detail_coverage": activity_detail_coverage(
+                        activity_records, source=source
+                    ),
                 }
             dates = [_garmin_activity_date(record) for record in pending]
             start, end = min(dates), max(dates)
@@ -185,16 +189,19 @@ def execute(args) -> dict[str, object]:
             if args.start is None or args.end is None:
                 raise ValueError("sync requires --start and --end, or --backfill-existing")
             start, end = args.start, args.end
-        connector = GarminCnConnector(home=home)
+        connector = (
+            GarminCnConnector(home=home)
+            if source == "garmin-cn"
+            else GarminGlobalConnector(home=home, timezone_name=runtime.timezone_name)
+        )
         prime = getattr(connector, "set_known_activity_summaries", None)
         if callable(prime):
-            prime(known_activity_summaries(
-                activity_records
-            ))
+            prime(known_activity_summaries(activity_records, source=source))
         result = IngestionService(
             athlete_id=runtime.athlete_id,
             store=runtime.store,
             raw_dir=runtime.layout.raw,
+            timezone_name=runtime.timezone_name,
         ).sync_chunked(
             connector,
             SyncWindow(start, end),
@@ -203,12 +210,13 @@ def execute(args) -> dict[str, object]:
         day_count = (end - start).days + 1
         chunk_count = (day_count + args.chunk_days - 1) // args.chunk_days
         return {
-            "source": "garmin-cn",
+            "source": source,
             "chunks": chunk_count,
             "start": start.isoformat(),
             "end": end.isoformat(),
             "activity_detail_coverage": activity_detail_coverage(
-                runtime.store.list_current(runtime.athlete_id, kind="activity")
+                runtime.store.list_current(runtime.athlete_id, kind="activity"),
+                source=source,
             ),
             **asdict(result),
         }
@@ -230,6 +238,36 @@ def execute(args) -> dict[str, object]:
     if args.command == "garmin-cn-revoke":
         GarminCnConnector(home=home).revoke()
         return {"revoked": True, "region": "cn"}
+    if args.command == "garmin-global-connect":
+        if not sys.stdin.isatty():
+            raise RuntimeError("Garmin international key setup requires a local terminal")
+        key = getpass.getpass("Garmin international Personal API key (hidden): ")
+        try:
+            connected = GarminGlobalConnector(
+                home=home, timezone_name=runtime.timezone_name
+            ).connect(key)
+            policy = host_tools.automation_configure(home, source="garmin-global")
+            return {**connected, "auto_sync": policy}
+        finally:
+            key = ""
+    if args.command == "garmin-global-status":
+        status = GarminGlobalConnector(
+            home=home, timezone_name=runtime.timezone_name
+        ).healthcheck()
+        return {"source": "garmin-global", "connected": status.ok, "message": status.message}
+    if args.command == "garmin-global-revoke":
+        GarminGlobalConnector(home=home).revoke()
+        automation = host_tools.HostRuntime.load(home).automation
+        policy = automation.get_subscription(runtime.athlete_id, "garmin-global")
+        if policy is not None and policy.enabled:
+            next_run_at = (
+                automation.get_next_run_at(runtime.athlete_id, "garmin-global")
+                or datetime.now(UTC)
+            )
+            automation.save_subscription(
+                replace(policy, enabled=False), next_run_at=next_run_at
+            )
+        return {"revoked": True, "source": "garmin-global", "auto_sync_enabled": False}
     if args.command.startswith("coros-"):
         action = args.command.removeprefix("coros-")
         gateway = CorosHelperGateway(home=home)

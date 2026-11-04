@@ -481,7 +481,9 @@ def _summary_hash(summary: dict[str, object]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def known_activity_summaries(records: list[CanonicalRecord]) -> dict[str, str]:
+def known_activity_summaries(
+    records: list[CanonicalRecord], *, source: str = "garmin-cn"
+) -> dict[str, str]:
     """Skip complete, unchanged activities while backfilling legacy summary-only rows."""
 
     known: dict[str, str] = {}
@@ -492,18 +494,20 @@ def known_activity_summaries(records: list[CanonicalRecord]) -> dict[str, str]:
         if not isinstance(digest, str):
             continue
         for evidence in record.evidence:
-            if evidence.source == "garmin-cn":
+            if evidence.source == source:
                 known[evidence.source_id] = digest
     return known
 
 
-def activity_detail_coverage(records: list[CanonicalRecord]) -> dict[str, int]:
+def activity_detail_coverage(
+    records: list[CanonicalRecord], *, source: str = "garmin-cn"
+) -> dict[str, int]:
     """Count current Garmin activities by locally available detail level."""
 
     coverage = {"complete": 0, "partial": 0, "summary_only": 0}
     for record in records:
         if record.kind != "activity" or not any(
-            item.source == "garmin-cn" for item in record.evidence
+            item.source == source for item in record.evidence
         ):
             continue
         status = record.data.get("detail_status")
@@ -589,7 +593,9 @@ def _canonical_payload(kind: str, payload: dict[str, object]) -> dict[str, JsonV
                         "detail_missing_sections": missing if isinstance(missing, list) else [],
                         "original_fit_zip_sha256": sync.get("original_fit_zip_sha256"),
                         "recorded_sample_count": (
-                            len(recorded_samples) if isinstance(recorded_samples, list) else 0
+                            sync.get("recorded_sample_count")
+                            if isinstance(sync.get("recorded_sample_count"), int)
+                            else len(recorded_samples) if isinstance(recorded_samples, list) else 0
                         ),
                     }
                     if sync else {}

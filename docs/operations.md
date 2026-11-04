@@ -19,13 +19,15 @@ athlete-growth garmin-cn-login --email "account@example.invalid"
 
 密码和 MFA 验证码由终端隐藏读取，不写进命令。请勿把凭据或会话文件内容发到聊天中。
 
+国际区账号使用官方 Personal API：先在[国际区设置页](https://connect.garmin.com/app/settings/personalApiToken)创建 Key，再在本机运行 `athlete-growth garmin-global-connect`。Key 由终端隐藏读取，连接成功时自动新增 `garmin-global` 同步策略；中国区会话继续独立存在。
+
 ## 2. 配置策略
 
 不带可选参数时会保存以下完整默认策略：
 
 | 字段 | 默认值 | 含义 |
 |---|---:|---|
-| `--source` | `garmin-cn` | 当前自动运行器实际装配的来源 |
+| `--source` | `garmin-cn` | 可选 `garmin-cn`、`garmin-global` 或 `coros`；不同来源有独立策略 |
 | `--interval-minutes` | `30` | 到期同步间隔 |
 | `--lookback-days` | `3` | 每次包含当天在内的回看天数 |
 | `--notification-mode` | `actionable-digest` | 可行动即时、其余延时 |
@@ -154,6 +156,7 @@ tail -n 100 ~/.athlete-growth/logs/automation.stderr.log
 ~/.athlete-growth/
 ├── config.toml
 ├── tokens/garmin-cn-session/       # 私密会话；不要查看或分享内容
+├── tokens/garmin-global-personal-api/ # 每位用户自己的国际区 Key 与短期令牌
 ├── profiles/<athlete-id>/
 │   ├── db/athlete.sqlite3          # 标准记录、自动化状态、快照、Inbox
 │   ├── raw/                        # 按内容哈希保存的原始证据

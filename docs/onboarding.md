@@ -46,7 +46,7 @@ athlete-growth status
 
 已有档案时不要重复初始化。自定义数据目录必须在后续每条命令中一致使用 `--data-home`，或统一设置 `ATHLETE_GROWTH_HOME`。
 
-### 3. 由用户亲自完成 Garmin 中国区登录
+### 3. 由用户亲自完成 Garmin 账号连接
 
 如果没有有效会话：
 
@@ -56,12 +56,14 @@ athlete-growth garmin-cn-login --email "account@example.invalid"
 
 用户只在本机终端输入密码和 MFA。助手不得要求用户把凭据粘贴到对话中，也不得读取会话文件来“验证”。当前连接器使用非官方 Garmin Connect 中国区网页会话，可能受服务或账户策略影响。
 
+如果使用国际区账号，在[国际区设置页](https://connect.garmin.com/app/settings/personalApiToken)创建一把新的 Personal API Key，再运行 `athlete-growth garmin-global-connect`。终端隐藏读取 Key，验证成功后自动启用该来源的 30 分钟同步策略；不使用中国区的 Key 或会话。更多说明见[设备连接](device-connections.md)。
+
 ### 4. 选择自动化策略
 
 初学者可直接采用默认值：每 30 分钟轮询、回看 3 天、可行动即时/其余本地 20 点投递。
 
 ```bash
-athlete-growth automation-configure
+athlete-growth automation-configure  # 中国区默认来源；国际区连接成功时已自动配置
 athlete-growth automation-status
 ```
 

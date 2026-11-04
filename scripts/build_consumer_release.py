@@ -109,6 +109,8 @@ def build_release(output: Path, wheel: Path | None = None) -> dict[str, Path]:
             "2. 回到当前 AI 对话，让 AI 检查本机 Trimate 和 MCP 连接状态；"
             "若当前宿主尚未配置连接器，由 AI 按该宿主的设置和授权流程继续。\n\n"
             "佳明、高驰属于产品通用数据来源，由每位用户自行授权。"
+            "佳明国际区在本机运行 `athlete-growth garmin-global-connect`，"
+            "隐藏输入本人创建的 Personal API Key，验证成功后自动启用同步策略。"
             "高驰的本机同步为试验能力：使用官方 OAuth helper，首次试同步成功后才开启自动轮询。"
             "官方 MCP 若不返回机器可读活动 ID，本机同步会明确停止。\n\n"
             "个人数据默认保存在 `~/.athlete-growth`，不会出现在此安装包。"
@@ -138,6 +140,8 @@ def build_release(output: Path, wheel: Path | None = None) -> dict[str, Path]:
             "# Trimate Windows 安装包\n\n"
             "解压后双击 `Install-Windows.cmd`。安装程序会配置 Python 环境、"
             "个人档案和可选设备同步；首次安装需要网络。"
+            "佳明国际区连接请在本机运行 `athlete-growth garmin-global-connect`，"
+            "隐藏输入本人创建的 Personal API Key。"
             "完成后回到当前 AI 对话检查本机 MCP 连接。个人数据保存在用户目录的"
             "`.athlete-growth`，不会随安装包分享。\n",
             encoding="utf-8",

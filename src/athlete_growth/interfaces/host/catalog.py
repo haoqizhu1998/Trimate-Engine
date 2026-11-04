@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
-CAPABILITY_VERSION = "1.18"
+CAPABILITY_VERSION = "1.19"
 
 CAPABILITIES: tuple[dict[str, object], ...] = (
     {
         "domain": "device_connections",
         "tools": ["get_sync_status", "run_sync_now", "list_activities", "get_data_quality"],
         "local_only": [
-            "garmin-cn-login", "garmin-cn-revoke", "coros-helper-install",
+            "garmin-cn-login", "garmin-cn-revoke", "garmin-global-connect",
+            "garmin-global-status", "garmin-global-revoke", "coros-helper-install",
             "coros-login-start", "coros-login-finish", "coros-login-status",
             "coros-revoke", "sync", "import-file",
         ],
@@ -17,6 +18,11 @@ CAPABILITIES: tuple[dict[str, object], ...] = (
             {
                 "id": "garmin-cn",
                 "personal_connection": "local_login",
+                "product_ingestion": "poll_implemented",
+            },
+            {
+                "id": "garmin-global",
+                "personal_connection": "official_personal_api_key_local_only",
                 "product_ingestion": "poll_implemented",
             },
             {
@@ -54,6 +60,18 @@ CAPABILITIES: tuple[dict[str, object], ...] = (
         "domain": "garmin_cn",
         "tools": ["get_sync_status", "run_sync_now"],
         "local_only": ["garmin-cn-login", "garmin-cn-revoke", "sync"],
+    },
+    {
+        "domain": "garmin_global",
+        "tools": ["get_sync_status", "run_sync_now"],
+        "local_only": [
+            "garmin-global-connect", "garmin-global-status",
+            "garmin-global-revoke", "sync",
+        ],
+        "note": (
+            "Official Personal API is for individual self-hosted use; "
+            "key stays in the private vault."
+        ),
     },
     {"domain": "analysis", "tools": ["get_today_report", "get_weekly_report"], "local_only": []},
     {

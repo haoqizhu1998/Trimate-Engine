@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import unittest
-from datetime import date
+from datetime import date, datetime
 from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -117,6 +117,29 @@ class CorosConnectorTests(unittest.TestCase):
             self.assertEqual(second.duplicates, 1)
             self.assertEqual(len(store.list_current("synthetic", kind="activity")), 1)
             self.assertTrue(list((root / "raw" / "coros").rglob("*.json")))
+
+    def test_exact_china_and_global_garmin_duplicate_count_once(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = SQLiteRecordStore(root / "athlete.sqlite3")
+            ingest = IngestionService(
+                athlete_id="synthetic", store=store, raw_dir=root / "raw"
+            )
+            base = {
+                "kind": "activity",
+                "occurred_at": datetime.fromisoformat("2026-10-20T07:00:00+08:00"),
+                "payload": {"source": "synthetic"},
+                "canonical_payload": {
+                    "sport": "running", "duration_min": 60, "distance_m": 10000,
+                },
+            }
+            china = RawSourceRecord(source="garmin-cn", source_id="cn-1", **base)
+            global_row = RawSourceRecord(
+                source="garmin-global", source_id="global-1", **base
+            )
+            self.assertEqual(ingest.ingest(SyncBatch((china,))).inserted, 1)
+            self.assertEqual(ingest.ingest(SyncBatch((global_row,))).duplicates, 1)
+            self.assertEqual(len(store.list_current("synthetic", kind="activity")), 1)
 
 
 if __name__ == "__main__":

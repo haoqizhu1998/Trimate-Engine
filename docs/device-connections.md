@@ -21,10 +21,24 @@
 | 来源 | 个人连接 | 在线查询 | 自动入产品私有库 | 变化分析与通知 |
 | --- | --- | --- | --- | --- |
 | 佳明中国区 | 本机登录，非官方 Garmin Connect 会话 | 通过产品库查询 | 已实现本机轮询和详情补齐 | 已实现 |
+| 佳明国际区 | 每位用户在本机隐藏输入官方 Personal API Key | 通过产品库查询 | 已实现本机轮询；保存原始 FIT ZIP，规范化活动和健康数据 | 复用自动分析流程；需国际区真实账号验收 |
 | 高驰 | 每位用户授权官方 COROS MCP，产品本机使用官方 helper | 可在支持 OAuth 的载体中查询 | 试验性本机轮询，需机器可读活动结果及真实账号验收 | 复用自动分析流程；需真实账号验收 |
 | 运动文件 | 用户本机选择 FIT/TCX/CSV/JSON | 导入后通过产品库查询 | 单文件导入已实现；高驰历史批量导入待实现 | 导入后的分析按现有用例运行 |
 
 高驰可在 GPT、WorkBuddy 等支持官方 COROS MCP 的载体中由用户自行授权查询。此时结果属于来源在线数据，不能称为已入产品私有库或跨载体共享的产品记录。本机适配器独立于载体，调用官方 OAuth helper；按日查询活动列表、详情和分圈，写入同一私有库。若列表只返回自然语言或达到上限，同步会报错，不会猜测 ID 或静默截断。当前未下载原始 FIT，活动详情标记为 `partial`。跨佳明与高驰只对开始时间、时长、距离几乎完全一致的活动自动去重；相近但无法确认的活动仍需后续核对。具体约束见 [ADR 0014](adr/0014-coros-device-connection.md)。
+
+## 本机佳明国际区连接
+
+每位用户先在[佳明国际区 Personal API 设置页](https://connect.garmin.com/app/settings/personalApiToken)使用自己的国际区账号创建 Key。Key 只在用户本机终端隐藏输入；中国区登录会话和国际区 Key 分别保存在不同的私有目录。国际区使用佳明[官方 Personal API Python 客户端](https://github.com/garmin/connect-personal-api-python)，该 API 仅面向个人自用，采取拉取方式；面向多用户的托管商业服务应另行申请商业接入。
+
+```sh
+athlete-growth garmin-global-connect
+athlete-growth garmin-global-status
+athlete-growth sync --source garmin-global --start 2026-11-01 --end 2026-11-04
+athlete-growth automation-status
+```
+
+连接成功会自动保存国际区每 30 分钟、回看 3 天的本机同步策略。已安装的后台任务会执行该新策略；未安装时可按[自动同步运行手册](operations.md)安装。首次历史补齐使用 `sync --source garmin-global`，日期分段由产品处理；重复记录不会重复计入训练量。活动原始 FIT ZIP 存于私有 Raw Vault，详情解析失败时标记为部分可用，不会声称已补齐。撤销本机连接运行 `athlete-growth garmin-global-revoke`，这也会停用国际区自动同步策略；若需在佳明端注销 Key，还要到设置页删除。
 
 ## 本机高驰连接与试验同步
 

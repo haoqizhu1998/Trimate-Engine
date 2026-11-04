@@ -15,6 +15,7 @@ from athlete_growth.adapters.garmin_cn.connector import (
     activity_detail_coverage,
     known_activity_summaries,
 )
+from athlete_growth.adapters.garmin_global import GarminGlobalConnector
 from athlete_growth.adapters.notifications import default_notification_sink
 from athlete_growth.adapters.scheduler import MacOSLaunchdScheduler, WindowsTaskScheduler
 from athlete_growth.adapters.storage import (
@@ -33,7 +34,7 @@ from athlete_growth.application.automation import (
 )
 
 DEFAULT_SOURCE = "garmin-cn"
-SUPPORTED_SOURCES = frozenset({DEFAULT_SOURCE, "coros"})
+SUPPORTED_SOURCES = frozenset({DEFAULT_SOURCE, "garmin-global", "coros"})
 DEFAULT_INTERVAL_MINUTES = 30
 DEFAULT_LOOKBACK_DAYS = 3
 DEFAULT_NOTIFICATION_MODE = NotificationMode.ACTIONABLE_DIGEST
@@ -58,6 +59,7 @@ _SAFE_ERROR_CLASSES = frozenset(
 class HostRuntime:
     home: Path
     athlete_id: str
+    timezone_name: str
     layout: VaultLayout
     profiles: SQLiteAthleteProfileRepository
     records: SQLiteRecordStore
@@ -73,11 +75,13 @@ class HostRuntime:
         if not layout.database_file.is_file():
             raise RuntimeError("default profile database is missing")
         profiles = SQLiteAthleteProfileRepository(layout.database_file)
-        if profiles.get_by_id(athlete_id) is None:
+        profile = profiles.get_by_id(athlete_id)
+        if profile is None:
             raise RuntimeError("default profile record is missing")
         return cls(
             home=home,
             athlete_id=athlete_id,
+            timezone_name=profile.timezone_name,
             layout=layout,
             profiles=profiles,
             records=SQLiteRecordStore(layout.database_file),
@@ -167,6 +171,13 @@ def automation_status(
         "activity_detail_coverage": activity_detail_coverage(
             runtime.records.list_current(runtime.athlete_id, kind="activity")
         ),
+        "activity_detail_coverage_by_source": {
+            source: activity_detail_coverage(
+                runtime.records.list_current(runtime.athlete_id, kind="activity"),
+                source=source,
+            )
+            for source in ("garmin-cn", "garmin-global")
+        },
         "backlog": {
             "due_subscriptions": len(due),
             "recoverable_runs": len(recoverable),
@@ -196,16 +207,27 @@ def run_automation_once(
     runtime = HostRuntime.load(data_home)
     active_clock = clock or (lambda: datetime.now(UTC))
     garmin_connector = GarminCnConnector(home=runtime.home)
+    global_connector = GarminGlobalConnector(
+        home=runtime.home, timezone_name=runtime.timezone_name
+    )
     prime = getattr(garmin_connector, "set_known_activity_summaries", None)
     if callable(prime):
         prime(known_activity_summaries(
             runtime.records.list_current(runtime.athlete_id, kind="activity")
         ))
+    global_connector.set_known_activity_summaries(known_activity_summaries(
+        runtime.records.list_current(runtime.athlete_id, kind="activity"),
+        source="garmin-global",
+    ))
     loop = AutomaticTrainingLoop(
         automation_repository=runtime.automation,
         record_store=runtime.records,
         profile_repository=runtime.profiles,
-        connectors={DEFAULT_SOURCE: garmin_connector, "coros": CorosConnector(home=runtime.home)},
+        connectors={
+            DEFAULT_SOURCE: garmin_connector,
+            "garmin-global": global_connector,
+            "coros": CorosConnector(home=runtime.home),
+        },
         raw_root=runtime.layout.raw,
         raw_directory_for_athlete=lambda athlete_id: (
             VaultLayout(

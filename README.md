@@ -10,7 +10,7 @@ Trimate 的产品源码、Agent/Skill、数据库结构、合成测试和公开�
 
 当前安装包尚未完成 Windows 实机及 WorkBuddy 新用户端到端验收；支持附件的普通 GPT 网页对话也无法单凭 ZIP 安装本机 MCP。当前可用范围与限制见下文和 [普通用户交付](docs/workbuddy-consumer-install.md)。
 
-GPT/Codex、WorkBuddy、Coze 是平行的对话载体；佳明、高驰是平行的设备数据来源。设备连接、标准化、去重和分析属于产品通用能力，不绑在某个载体上。当前佳明中国区已实现本机自动入库；高驰有官方 MCP 在线查询及试验性本机轮询，真实账号链路仍需验收。见[设备连接能力](docs/device-connections.md)。
+GPT/Codex、WorkBuddy、Coze 是平行的对话载体；佳明、高驰是平行的设备数据来源。设备连接、标准化、去重和分析属于产品通用能力，不绑在某个载体上。佳明中国区与国际区均支持本机自动入库，国际区通过每位用户自己的官方 Personal API Key 连接；高驰有官方 MCP 在线查询及试验性本机轮询，真实账号链路仍需验收。见[设备连接能力](docs/device-connections.md)。
 
 产品提供训练与一般健康指导，不提供疾病诊断、治疗、处方或紧急监护。疼痛、疾病、肿胀或日常功能受限会触发确定性安全规则，并建议用户寻求合适的专业帮助。
 
@@ -18,7 +18,7 @@ GPT/Codex、WorkBuddy、Coze 是平行的对话载体；佳明、高驰是平行
 
 阶段 0–5 的本地功能和自动化测试已完成到仓库现有范围。阶段 5.5 已实现以下本地自动闭环：
 
-- Garmin 中国区只读轮询；
+- Garmin 中国区和国际区独立凭据、只读轮询；
 - 私有 SQLite、内容寻址的原始证据和不可变分析快照；
 - 仅在标准记录实际变化时自动运行确定性日报/周报和安全规则；
 - 持久化通知 Inbox、macOS 系统通知、失败重试与崩溃恢复；
@@ -30,10 +30,11 @@ GPT/Codex、WorkBuddy、Coze 是平行的对话载体；佳明、高驰是平行
 - 新活动与课表核对：同日或相邻一天的活动会形成唯一、跨日或有歧义的候选关系，并列出额外活动；用户核对完成状态、RPE 和疼痛后再确认写入，设备数据不会自动判定完成。
 - 可连接 Codex app-server 的 MCP 重载命令：`athlete-growth mcp-reload`；桌面嵌入式会话若无控制 socket，命令会提示需要重启，详见 [GPT 对话接入](docs/chatgpt-mcp.md)。
 - 高驰 COROS 官方 MCP 的中国区在线连接与本机试验性轮询见[设备连接](docs/device-connections.md)。本机同步依赖官方 OAuth helper 和机器可读的活动列表，真实账号链路尚需验收。
+- 佳明国际区通过[官方 Personal API](https://developer.garmin.com/gc-developer-program/personal/personal-api/)接入；Key 只由每位用户在本机隐藏输入，连接成功后新增自动同步策略。国际区真实账号链路仍需用户自行验收。
 
 尚未实现：ChatGPT 网页端插件的账号侧安装与远程连接、Coze 适配、HTTP/OpenAPI 传输；通用交付 ZIP 内含双平台本机引擎安装文件，但尚未完成 Windows 实机、WorkBuddy 客户端及全新机器验收，跨对话常驻仍需宿主配置；OAuth/OIDC 与官方 Garmin 商业 Push；邮件和移动端投递；Linux systemd 安装器；独立 Web/App；托管、多用户常驻服务。本地 MCP 适配器不等于 ChatGPT 插件已经安装。当前目标共创需要用户/对话宿主补充类型等字段；目标支持新增、替换、删除的预览与确认。计划支持近期训练暴露约束的 7 天排课、重点轮换预测、目标变化复核和新版草案，尚无自动渐进的多周专项处方。
 
-本仓库没有声称已经在某位用户的 Mac 上完成 Garmin 登录或真实后台安装验证。真实使用仍需用户亲自完成登录、首次检查，并明确选择是否安装 `launchd`。
+本仓库没有声称已经在某位用户的 Mac 上完成 Garmin 登录或真实后台安装验证。真实使用仍需用户亲自完成登录或 Key 授权、首次检查，并明确选择是否安装 `launchd`。
 
 本地 MCP 与 ChatGPT 私有连接方式见 [GPT 对话接入](docs/chatgpt-mcp.md)。确认类工具必须在用户看过草案并明确同意后调用；现有本地 MCP 只强制草案版本和两步流程，尚不能独立证明真人已经同意，因此不应把它当作可直接暴露公网的远程授权方案。
 
@@ -57,7 +58,7 @@ Garmin/设备先把数据上传到产品可访问的来源
 
 ## 安装与初始化
 
-面向朋友可从 [GitHub 预览发布页](https://github.com/haoqizhu1998/Trimate-Engine/releases/tag/V1.2.5)下载唯一的 `Trimate-V1.2.5.zip`，由 WorkBuddy 或支持附件的 GPT 对话识别入口并开始引导；本机数据连接与自动同步仍需宿主具备本机执行能力并由用户授权。包内的 Windows/Mac 安装文件及使用边界见 [普通用户交付](docs/workbuddy-consumer-install.md)。下面是源码开发安装步骤。
+面向朋友可从 [GitHub 预览发布页](https://github.com/haoqizhu1998/Trimate-Engine/releases/tag/V1.3.0)下载唯一的 `Trimate-V1.3.0.zip`，由 WorkBuddy 或支持附件的 GPT 对话识别入口并开始引导；本机数据连接与自动同步仍需宿主具备本机执行能力并由用户授权。包内的 Windows/Mac 安装文件及使用边界见 [普通用户交付](docs/workbuddy-consumer-install.md)。下面是源码开发安装步骤。
 
 日报、周报和每日决策预览可展示夜间 HRV 的最近一晚与滚动对比；测量口径、样本要求和训练解释边界见 [HRV 方法](experience/docs/hrv-recovery-methodology.md)。
 
@@ -86,7 +87,9 @@ athlete-growth garmin-cn-login --email "account@example.invalid"
 
 密码和 MFA 验证码只在本机隐藏输入。不要把密码、验证码或会话文件内容粘贴到聊天、日志或 Git。
 
-Garmin 活动同步会按活动 ID 读取完整活动页、分圈、分段、心率/功率区间及逐点详情，并把可下载的原始 FIT 压缩包保存在私有 Raw Vault。分析常用的分圈字段进入规范化记录；路线和逐点原始响应不会直接暴露给对话模型。某些活动没有设备原始文件或 Garmin 端点不可用时，记录会标记缺失部分。已完整同步且列表摘要未变的活动会跳过详情请求。
+国际区用户在[佳明国际区设置页](https://connect.garmin.com/app/settings/personalApiToken)创建自己的 Personal API Key，再运行 `athlete-growth garmin-global-connect`；Key 也只在本机隐藏输入，产品不会把中国区会话用于国际区。
+
+Garmin 中国区活动同步会按活动 ID 读取完整活动页、分圈、分段、心率/功率区间及逐点详情，并把可下载的原始 FIT 压缩包保存在私有 Raw Vault。分析常用的分圈字段进入规范化记录；路线和逐点原始响应不会直接暴露给对话模型。某些活动没有设备原始文件或 Garmin 端点不可用时，记录会标记缺失部分。已完整同步且列表摘要未变的活动会跳过详情请求。
 
 升级前已同步的旧活动仍只有汇总；要补齐已入库活动的历史详情，在本机运行：
 
@@ -156,7 +159,7 @@ athlete-growth backup
 athlete-growth restore profile.zip --target-home /path/to/new-private-vault
 ```
 
-Garmin 中国区连接器读取活动详情与原始文件、每日汇总、步数、睡眠、HRV、心率、压力、身体电量和体重。它依赖本地 `python-garminconnect` 网页会话，是非官方接口，可能因服务或账户策略变化失效；文件导入仍是离线兜底。它不会写回 Garmin。
+Garmin 中国区连接器读取活动详情与原始文件、每日汇总、步数、睡眠、HRV、心率、压力、身体电量和体重。它依赖本地 `python-garminconnect` 网页会话，是非官方接口，可能因服务或账户策略变化失效。国际区连接器使用佳明官方 Python Personal API 客户端，保存原始活动 FIT ZIP，并规范化可解析的分圈和健康数据；逐点数据保留在私有原始文件中。两种来源均不会写回 Garmin；文件导入仍是离线兜底。
 
 ## 验证
 

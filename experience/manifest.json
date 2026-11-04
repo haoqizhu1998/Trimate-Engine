@@ -4,7 +4,7 @@
     "id": "athlete-training-partner",
     "version": "1.8.0",
     "source": "agent.md",
-    "minimum_capability_version": "1.18"
+    "minimum_capability_version": "1.19"
   },
   "skills": [
     {

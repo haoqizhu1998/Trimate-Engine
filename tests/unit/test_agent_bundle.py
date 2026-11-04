@@ -18,7 +18,7 @@ class AgentBundleTests(unittest.TestCase):
             old.write_text("{}", encoding="utf-8")
             output = bundle.build_bundle(Path(tmp) / "out")
             metadata = json.loads((output / "bundle.json").read_text(encoding="utf-8"))
-            self.assertEqual(metadata["capability_version"], "1.18")
+            self.assertEqual(metadata["capability_version"], "1.19")
             self.assertEqual(
                 len(metadata["skills"]), len(manifest["skills"]),
             )
@@ -77,7 +77,7 @@ class AgentBundleTests(unittest.TestCase):
                     "id": "athlete-training-partner",
                     "version": "0.1.0",
                     "source": "agent.md",
-                    "minimum_capability_version": "1.18",
+                    "minimum_capability_version": "1.19",
                 },
                 "skills": [
                     {
