@@ -59,6 +59,38 @@ class ReportServiceTests(unittest.TestCase):
             self.assertEqual(report.objective["steps"], 9000)
             self.assertNotIn("objective daily summary", report.data_gaps)
 
+    def test_daily_report_includes_prior_evening_sleep_for_wake_date(self) -> None:
+        wake_date = date(2026, 10, 26)
+        sleep_start = datetime(2026, 10, 25, 13, 0, tzinfo=UTC)
+        evidence = EvidenceRef("garmin-cn", "sleep-26", sleep_start, "a" * 64)
+        with TemporaryDirectory() as directory:
+            store = SQLiteRecordStore(Path(directory) / "athlete.sqlite3")
+            store.save(
+                CanonicalRecord.create(
+                    athlete_id="athlete-001",
+                    kind="daily-summary",
+                    occurred_at=datetime(2026, 10, 25, 16, 0, tzinfo=UTC),
+                    data={"calendar_date": wake_date.isoformat(), "sleep_seconds": None},
+                )
+            )
+            store.save(
+                CanonicalRecord.create(
+                    athlete_id="athlete-001",
+                    kind="sleep",
+                    occurred_at=sleep_start,
+                    data={"calendar_date": wake_date.isoformat(), "sleep_seconds": 28800},
+                    evidence=(evidence,),
+                )
+            )
+            report = service.ReportService(
+                "athlete-001", store, timezone_name="Asia/Shanghai"
+            ).daily(wake_date)
+
+        self.assertEqual(report.objective["sleep_seconds"], 28800)
+        self.assertEqual(report.objective["sleep_hours"], 8.0)
+        self.assertNotIn("sleep duration", report.data_gaps)
+        self.assertIn("a" * 64, report.evidence_ids)
+
     def test_daily_report_exposes_typed_overnight_hrv_separately_from_sleep(self) -> None:
         on = date(2026, 10, 26)
         with TemporaryDirectory() as directory:

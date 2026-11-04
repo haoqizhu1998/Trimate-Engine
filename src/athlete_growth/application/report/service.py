@@ -55,6 +55,14 @@ class ReportService:
         objective: dict[str, JsonValue] = {}
         for record in objective_records:
             objective.update(record.data)
+        sleep_record = self._daily_sleep_record(calendar_date, start=start, end=end)
+        if sleep_record is not None:
+            sleep_seconds = self._sleep_duration_seconds(sleep_record)
+            if sleep_seconds is not None:
+                objective["sleep_seconds"] = sleep_seconds
+        sleep_seconds = objective.get("sleep_seconds")
+        if isinstance(sleep_seconds, (int, float)) and 0 < sleep_seconds <= 86400:
+            objective["sleep_hours"] = round(sleep_seconds / 3600, 2)
         check_in = check_ins[-1] if check_ins else None
         subjective = dict(check_in.data) if check_in else None
         history_start = datetime.combine(
@@ -78,7 +86,7 @@ class ReportService:
         evidence = tuple(
             dict.fromkeys(
                 evidence.raw_hash or record.record_id
-                for record in records
+                for record in (records + [sleep_record] if sleep_record else records)
                 for evidence in record.evidence
             )
         )
@@ -90,6 +98,8 @@ class ReportService:
         gaps = list(analytics.data_gaps) + list(safety.data_gaps)
         if not objective_records:
             gaps.append("objective daily summary")
+        if "sleep_hours" not in objective:
+            gaps.append("sleep duration")
         confidence = min(analytics.confidence, 0.9 if check_in else 0.45)
         return WellnessReport(
             calendar_date.isoformat(),
@@ -171,3 +181,35 @@ class ReportService:
             start=start,
             end=end,
         )
+
+    def _daily_sleep_record(
+        self, calendar_date: date, *, start: datetime, end: datetime
+    ) -> CanonicalRecord | None:
+        # A night's record may be timestamped at sleep onset on the previous day.
+        candidates = self._records(start=start - timedelta(days=1), end=end + timedelta(days=1))
+        matching = [
+            record
+            for record in candidates
+            if record.kind == "sleep"
+            and self._sleep_duration_seconds(record) is not None
+            and (
+                record.data.get("calendar_date") == calendar_date.isoformat()
+                or (
+                    not record.data.get("calendar_date")
+                    and record.occurred_at.astimezone(self.timezone).date() == calendar_date
+                )
+            )
+        ]
+        if not matching:
+            return None
+        return max(matching, key=lambda record: (record.occurred_at, record.record_id))
+
+    @staticmethod
+    def _sleep_duration_seconds(record: CanonicalRecord) -> float | None:
+        seconds = record.data.get("sleep_seconds")
+        if not isinstance(seconds, (int, float)):
+            hours = record.data.get("sleep_hours")
+            seconds = hours * 3600 if isinstance(hours, (int, float)) else None
+        if isinstance(seconds, (int, float)) and 0 < seconds <= 86400:
+            return float(seconds)
+        return None

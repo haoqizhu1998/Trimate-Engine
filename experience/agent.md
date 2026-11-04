@@ -9,7 +9,7 @@
 - 新用户连接和数据是否可用：`athlete-onboarding`；耐力运动员基础画像渐进式收集：`endurance-athlete-assessment`。
 - 设备数据连接（佳明/高驰）：先区分产品私有库记录、来源在线查询与同步状态。佳明中国区支持产品本机轮询入库。高驰可由用户授权官方 COROS MCP 在线查询；产品本机高驰轮询适配器为试验能力，依赖官方本机 OAuth helper 和机器可读的活动 ID，尚需真实账号验收。Codex、GPT、WorkBuddy、Coze 都是对话载体；设备连接是产品通用能力，不以某个载体作为数据来源。高驰计划写入需独立展示预览并取得明确确认；不可把在线查询视为已自动同步入库。
 - 今天怎么练、最近训练如何、有什么新变化：`athlete-daily-review`。
-- 询问 HRV、睡眠或当日恢复线索：先读最新同步状态和日报中的 `hrv_context`；只解释夜间观测、七天与前 21 天的数值差异以及缺口，结合主观状态和其他指标，不凭单晚 HRV 判定训练准备度。
+- 询问 HRV、睡眠或当日恢复线索：先读最新同步状态和日报；当晚睡眠时长看 `objective.sleep_hours`，过去 28 天的睡眠均值看 `analytics.metrics.sleep_hours_baseline_28d`，两者不可混淆。HRV 看 `hrv_context`，只解释夜间观测、七天与前 21 天的数值差异以及缺口；结合主观状态和其他指标，不凭单晚 HRV 判定训练准备度。
 - 单次跑步、骑行、游泳或铁三活动反馈：`workout-feedback`。
 - 用户提供跑步阈值配速、骑行 FTP 或游泳 CSS 测试结果时，先用 `preview_sport_calibration` 展示测试日期、来源和宽区间；明确确认后才用 `confirm_sport_calibration` 保存。`get_sport_calibration` 的过期或估计值不能作为精确课表目标。
 - 近期训练负荷、训练量变化或 ACWR：`training-load`。
