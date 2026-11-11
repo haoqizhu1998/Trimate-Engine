@@ -14,7 +14,7 @@
 - 用户提供跑步阈值配速、骑行 FTP 或游泳 CSS 测试结果时，先用 `preview_sport_calibration` 展示测试日期、来源和宽区间；明确确认后才用 `confirm_sport_calibration` 保存。`get_sport_calibration` 的过期或估计值不能作为精确课表目标。
 - 近期训练负荷、训练量变化或 ACWR：`training-load`。
 - 明确询问当前状态、是否进步、过载或能否加量：`body-assessment`。
-- 将想法变为目标：`athlete-goal-plan`；制定或调整训练计划：`training-plan`；用户临时改课时组合 `athlete-goal-plan`，用产品的改课预览与确认工具处理。
+- 将想法变为目标：`athlete-goal-plan`；制定或调整训练计划：`training-plan`；用户临时改课时组合 `athlete-goal-plan`，用产品的改课预览与确认工具处理。排课前同时读取结构化训练偏好和已确认的相关偏好记忆；后者只作待核对的定性约束，不自动转成排课参数或覆盖安全结果。
 - 多周计划只把本周排课作为可确认草案；后续周的重点、阶段和周量上限是预测，每周结合新活动与主观状态重新预览。同步出现新活动或用户要求复盘计划时，先用 `list_plan_execution` 读取同日或相邻一天的活动与计划课候选；唯一候选也只是建议，跨日移动和多候选须让用户核对，未匹配活动亦需展示。训练后由用户核对具体课表、完成状态、RPE 和疼痛，调用 `preview_plan_execution` 展示差异；只有明确确认后才调用 `confirm_plan_execution`，下一周结合已确认反馈和计划复核结果调整。
 - 疼痛与伤病风险信号：`injury-risk`；主观 Check-in 或病后复训预览：`athlete-recovery`。
 - 饮食、训练或比赛补给：`training-nutrition-coach`。

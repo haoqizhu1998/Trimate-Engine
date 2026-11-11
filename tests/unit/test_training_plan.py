@@ -137,6 +137,94 @@ class TrainingPlanTests(unittest.TestCase):
         )
         self.assertFalse(any(item.session_type == "long" for item in plan.sessions))
 
+    def test_sustained_training_can_build_above_last_seven_days(self) -> None:
+        start = date(2026, 10, 26)
+        sessions = tuple(
+            ("running", 50, start - timedelta(days=age))
+            for age in (2, 4, 6, 9, 11, 13, 16, 18, 20)
+        )
+        constraints = models.TrainingConstraints(
+            {weekday: 65 for weekday in range(7)}, frozenset(), 250, ("running",)
+        )
+        safety = SafetyAssessment(RiskLevel.LOW, (), (), (), ())
+        planner = service.TrainingPlanner()
+        decision = planner.volume_decision(
+            start_date=start, recent_sessions=sessions,
+            constraints=constraints, safety=safety,
+        )
+        plan = planner.generate(
+            athlete_id="athlete-001",
+            goal=Goal("g6", "athlete-001", "race", "Half marathon", 3, None),
+            constraints=constraints, safety=safety, start_date=start,
+            recent_sessions=sessions,
+        )
+        self.assertEqual(decision.mode, "progressive_build")
+        self.assertEqual(decision.observed_week_minutes, (150, 150, 150, 0))
+        self.assertGreater(sum(item.duration_min for item in plan.sessions), 150)
+        self.assertLessEqual(sum(item.duration_min for item in plan.sessions), 250)
+        self.assertLessEqual(len(plan.sessions), 4)
+
+    def test_one_lighter_week_can_return_toward_established_volume(self) -> None:
+        start = date(2026, 10, 26)
+        sessions = (
+            ("running", 55, start - timedelta(days=2)),
+            ("running", 55, start - timedelta(days=5)),
+            *(("running", 70, start - timedelta(days=age))
+              for age in (9, 11, 13, 16, 18, 20)),
+        )
+        constraints = models.TrainingConstraints(
+            {weekday: 70 for weekday in range(7)}, frozenset(), 300, ("running",)
+        )
+        decision = service.TrainingPlanner.volume_decision(
+            start_date=start, recent_sessions=sessions, constraints=constraints,
+            safety=SafetyAssessment(RiskLevel.LOW, (), (), (), ()),
+        )
+        self.assertEqual(decision.mode, "return_to_baseline")
+        self.assertGreater(decision.target_minutes, 110)
+        self.assertLess(decision.target_minutes, 210)
+
+    def test_spike_or_unknown_readiness_does_not_authorize_progression(self) -> None:
+        start = date(2026, 10, 26)
+        sessions = (
+            *(("running", 100, start - timedelta(days=age)) for age in (2, 4, 6)),
+            *(("running", 30, start - timedelta(days=age))
+              for age in (9, 11, 13, 16, 18, 20)),
+        )
+        constraints = models.TrainingConstraints(
+            {weekday: 90 for weekday in range(7)}, frozenset(), 400, ("running",)
+        )
+        low = service.TrainingPlanner.volume_decision(
+            start_date=start, recent_sessions=sessions, constraints=constraints,
+            safety=SafetyAssessment(RiskLevel.LOW, (), (), (), ()),
+        )
+        unknown = service.TrainingPlanner.volume_decision(
+            start_date=start, recent_sessions=sessions, constraints=constraints,
+            safety=SafetyAssessment(RiskLevel.UNKNOWN, (), (), (), ()),
+        )
+        self.assertEqual(low.mode, "recent_spike_hold")
+        self.assertEqual(low.target_minutes, 300)
+        self.assertEqual(unknown.mode, "safety_hold")
+        self.assertEqual(unknown.target_minutes, 300)
+
+    def test_inactive_middle_week_does_not_count_as_continuous_training(self) -> None:
+        start = date(2026, 10, 26)
+        sessions = (
+            *(("running", 50, start - timedelta(days=age)) for age in (2, 4, 6)),
+            *(("running", 50, start - timedelta(days=age)) for age in (16, 18, 20)),
+            *(("running", 50, start - timedelta(days=age)) for age in (23, 25, 27)),
+        )
+        decision = service.TrainingPlanner.volume_decision(
+            start_date=start, recent_sessions=sessions,
+            constraints=models.TrainingConstraints(
+                {weekday: 60 for weekday in range(7)},
+                frozenset(), 250, ("running",),
+            ),
+            safety=SafetyAssessment(RiskLevel.LOW, (), (), (), ()),
+        )
+        self.assertEqual(decision.observed_week_minutes, (150, 0, 150, 150))
+        self.assertEqual(decision.mode, "recent_hold")
+        self.assertEqual(decision.target_minutes, 150)
+
 
 if __name__ == "__main__":
     unittest.main()

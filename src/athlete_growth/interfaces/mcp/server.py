@@ -23,7 +23,7 @@ from athlete_growth.interfaces.mcp import capabilities as capability_mcp
 
 PROTOCOL_VERSION = "2025-06-18"
 SERVER_NAME = "athlete-growth"
-SERVER_VERSION = "0.4.0"
+SERVER_VERSION = "0.5.0"
 SERVER_INSTRUCTIONS = (
     "Use this local athlete's MCP tools for evidence-backed training conversations. "
     "Read onboarding, sync and report status before planning. Treat missing check-ins "

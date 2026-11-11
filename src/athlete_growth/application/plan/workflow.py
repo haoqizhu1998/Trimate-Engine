@@ -557,6 +557,13 @@ class PlanningWorkflow:
         recent_week = [
             item for item in recent_sessions if (start_date - item[2]).days <= 7
         ]
+        planner = TrainingPlanner()
+        volume = planner.volume_decision(
+            start_date=start_date,
+            recent_sessions=tuple(recent_sessions),
+            constraints=constraints,
+            safety=report.safety,
+        )
         if not recent_sessions:
             assumptions.append(
                 "No recent training duration was found; preview is limited to two short "
@@ -570,6 +577,22 @@ class PlanningWorkflow:
                 "used to restore training volume; this restart preview is limited to short "
                 "easy sessions with a 30-minute single-session ceiling."
             )
+        elif volume.mode in {"progressive_build", "return_to_baseline"}:
+            assumptions.append(
+                "This week's volume budget uses the last four observed seven-day windows "
+                "and current safety status. The increase is a reviewable product planning "
+                "heuristic, not a proven safe percentage or a requirement to fill every minute."
+            )
+        elif volume.mode == "recent_spike_hold":
+            assumptions.append(
+                "The latest week is much higher than the preceding training pattern; "
+                "the preview does not add more volume on top of that spike."
+            )
+        elif volume.mode == "safety_hold":
+            assumptions.append(
+                "Current recovery evidence is incomplete or elevated, so this preview "
+                "does not increase the observed weekly volume."
+            )
         if excluded_activity_count:
             assumptions.append(
                 "Activities with quality flags or invalid durations were excluded from "
@@ -581,7 +604,7 @@ class PlanningWorkflow:
                     f"No recent {sport} session was found; that sport uses a provisional "
                     "30-minute single-session ceiling."
                 )
-        generated = TrainingPlanner().generate(
+        generated = planner.generate(
             athlete_id=self.athlete_id,
             goal=goal,
             constraints=constraints,
@@ -672,7 +695,10 @@ class PlanningWorkflow:
             "excluded_activity_count": excluded_activity_count,
             "recent_7d_activity_count": len(recent_week),
             "recent_7d_minutes": sum(item[1] for item in recent_week),
-            "baseline_mode": "restart_or_unknown" if not recent_week else "recent_week",
+            "baseline_mode": volume.mode,
+            "observed_week_minutes": list(volume.observed_week_minutes),
+            "typical_prior_minutes": volume.typical_prior_minutes,
+            "weekly_volume_budget_minutes": volume.target_minutes,
             "event_day": event_day.isoformat() if event_day else None,
             "taper_week": taper_week,
             "calibration_record_ids": {
@@ -796,11 +822,17 @@ class PlanningWorkflow:
         goal_deadline = date.fromisoformat(str(deadline_value)) if deadline_value else None
         summary = preview["summary"]
         assert isinstance(summary, dict)
+        planning_context = preview.get("planning_context")
         cycle = add_progression_envelope(
             cycle,
             observed_first_week_minutes=int(summary["total_minutes"]),
             goal_type=str(goal_record.data.get("goal_type")),
             goal_deadline=goal_deadline,
+            progression_eligible=(
+                isinstance(planning_context, dict)
+                and planning_context.get("baseline_mode")
+                in {"progressive_build", "return_to_baseline"}
+            ),
         )
         draft = self._draft("plan", str(preview["preview_id"]))
         scope = "first seven days are a confirmable draft; later weeks are focus forecasts only"
@@ -1168,18 +1200,10 @@ class PlanningWorkflow:
         ]
         response_constraint = None
         if any(item["status"] in {"partial", "skipped"} for item in execution_feedback):
-            summary = prior.data.get("summary")
-            total = summary.get("total_minutes") if isinstance(summary, dict) else None
-            if isinstance(total, int) and not isinstance(total, bool):
-                previous_minutes = total
-                constraints = replace(
-                    constraints,
-                    max_weekly_minutes=min(constraints.max_weekly_minutes, previous_minutes),
-                )
-                response_constraint = (
-                    "At least one session was reported partial or skipped; "
-                    "the next preview cannot raise the weekly ceiling."
-                )
+            response_constraint = (
+                "Partial or skipped sessions are not carried forward. The next volume "
+                "budget follows observed activity, current safety and the user's time limit."
+            )
         if cycle is not None:
             constraints = replace(
                 constraints,

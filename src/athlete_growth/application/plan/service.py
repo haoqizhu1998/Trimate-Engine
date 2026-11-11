@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import asdict, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, date, datetime, timedelta
+from math import ceil
+from statistics import median
 
 from athlete_growth.domain.goals import Goal
 from athlete_growth.domain.records import CanonicalRecord
@@ -18,8 +20,87 @@ from athlete_growth.domain.training import (
 from athlete_growth.ports.repositories import CanonicalRecordRepository
 
 
+@dataclass(frozen=True, slots=True)
+class VolumeDecision:
+    target_minutes: int
+    mode: str
+    observed_week_minutes: tuple[int, int, int, int]
+    typical_prior_minutes: int | None
+    session_limit: int
+
+
 class TrainingPlanner:
-    algorithm_version = "training-planner/1.4"
+    algorithm_version = "training-planner/1.5"
+
+    @staticmethod
+    def volume_decision(
+        *,
+        start_date: date,
+        recent_sessions: tuple[tuple[str, int, date], ...],
+        constraints: TrainingConstraints,
+        safety: SafetyAssessment,
+    ) -> VolumeDecision:
+        """Use sustained observed training, not one isolated week or an old peak."""
+        weekly = [0, 0, 0, 0]
+        session_counts = [0, 0, 0, 0]
+        for sport, minutes, day in recent_sessions:
+            age = (start_date - day).days
+            if sport in constraints.allowed_sports and minutes > 0 and 1 <= age <= 28:
+                index = (age - 1) // 7
+                weekly[index] += minutes
+                session_counts[index] += 1
+        available_days = sum(
+            1 for offset in range(7)
+            if (day := start_date + timedelta(days=offset)).weekday()
+            not in constraints.unavailable_weekdays
+            and constraints.available_minutes_by_weekday.get(day.weekday(), 0) > 0
+        )
+        latest = weekly[0]
+        active_prior = [value for value in weekly[1:] if value > 0]
+        typical = round(median(active_prior)) if len(active_prior) >= 2 else None
+        multisport_slots = (
+            len(constraints.allowed_sports) + 1
+            if len(constraints.allowed_sports) > 1
+            and latest >= 20 * len(constraints.allowed_sports)
+            else 0
+        )
+        if latest == 0:
+            mode = "restart_or_unknown"
+            target = 30 * min(available_days, max(2, min(3, len(constraints.allowed_sports))))
+            session_limit = min(available_days, max(2, min(3, len(constraints.allowed_sports))))
+        else:
+            target = latest
+            mode = "recent_hold"
+            session_limit = min(available_days, max(1, session_counts[0], multisport_slots))
+            stable_prior = (
+                typical is not None
+                and weekly[1] > 0 and weekly[2] > 0
+                and min(active_prior) >= 0.6 * max(active_prior)
+            )
+            if safety.level != RiskLevel.LOW:
+                mode = "safety_hold"
+            elif stable_prior and typical is not None and session_counts[0] >= 2:
+                if latest > 1.25 * typical:
+                    mode = "recent_spike_hold"
+                elif latest >= 0.8 * typical:
+                    mode = "progressive_build"
+                    target = latest + min(30, max(10, round(typical * 0.08)))
+                    session_limit = min(
+                        available_days, max(max(session_counts) + 1, multisport_slots)
+                    )
+                elif latest >= 0.5 * typical:
+                    mode = "return_to_baseline"
+                    target = round((latest + typical) / 2)
+                    session_limit = min(
+                        available_days, max(max(session_counts), multisport_slots)
+                    )
+        return VolumeDecision(
+            target_minutes=min(constraints.max_weekly_minutes, target),
+            mode=mode,
+            observed_week_minutes=(weekly[0], weekly[1], weekly[2], weekly[3]),
+            typical_prior_minutes=typical,
+            session_limit=session_limit,
+        )
 
     def generate(
         self,
@@ -64,26 +145,14 @@ class TrainingPlanner:
             )
             for sport in constraints.allowed_sports
         }
-        # The user-provided maximum is a ceiling, never a target to fill.
-        observed_minutes_7d = sum(minutes for _, minutes, _ in latest_week)
-        available_days = sum(
-            1
-            for offset in range(7)
-            if (start_date + timedelta(days=offset)).weekday()
-            not in constraints.unavailable_weekdays
-            and constraints.available_minutes_by_weekday.get(
-                (start_date + timedelta(days=offset)).weekday(), 0
-            )
-            > 0
+        budget = self.volume_decision(
+            start_date=start_date,
+            recent_sessions=recent_sessions,
+            constraints=constraints,
+            safety=safety,
         )
         sparse_baseline = not latest_week
-        provisional_session_limit = min(
-            available_days, max(2, min(3, len(constraints.allowed_sports)))
-        )
-        remaining = min(
-            constraints.max_weekly_minutes,
-            30 * provisional_session_limit if sparse_baseline else observed_minutes_7d,
-        )
+        remaining = budget.target_minutes
         sessions: list[PlannedSession] = []
         sports = constraints.allowed_sports
         focus = constraints.focus_sport or sports[0]
@@ -119,16 +188,16 @@ class TrainingPlanner:
         if not can_key:
             long_date = None
         key_dates = {day for day in (quality_date, long_date) if day is not None}
-        for offset in range(7):
-            if sparse_baseline and len(sessions) >= provisional_session_limit:
-                break
-            session_date = start_date + timedelta(days=offset)
+        selected_dates = [day for day in available_dates if day in key_dates]
+        selected_dates.extend(
+            day for day in available_dates
+            if day not in key_dates and len(selected_dates) < budget.session_limit
+        )
+        selected_dates = sorted(selected_dates[:budget.session_limit])
+        templates: list[tuple[date, str, str, int]] = []
+        for index, session_date in enumerate(selected_dates):
             weekday = session_date.weekday()
-            if weekday in constraints.unavailable_weekdays:
-                continue
             available = constraints.available_minutes_by_weekday.get(weekday, 0)
-            if available <= 0 or remaining <= 0:
-                continue
             session_type = (
                 "quality"
                 if session_date == quality_date
@@ -136,45 +205,41 @@ class TrainingPlanner:
                 if session_date == long_date
                 else "recovery"
                 if any(
-                    (session_date - item.session_date).days == 1
-                    and item.session_type in {"quality", "long"}
-                    for item in sessions
+                    (session_date - day).days == 1 and kind in {"quality", "long"}
+                    for day, kind, _, _ in templates
                 )
                 else "aerobic"
             )
             sport = (
                 focus
                 if session_type in {"quality", "long"} or constraints.aerobic_mixing is False
-                else sports[len(sessions) % len(sports)]
+                else sports[index % len(sports)]
             )
-            # Do not prescribe an unobserved long session from availability alone.
             exposure_cap = (
                 observed_longest[sport]
                 if sport in latest_sports
                 else min(30, older_longest.get(sport, 0) or 30)
             )
-            reserve = sum(
-                min(
-                    constraints.available_minutes_by_weekday.get(day.weekday(), 0),
-                    observed_longest.get(focus, 0),
-                )
-                // 2
-                for day in key_dates
-                if day > session_date
-            )
-            duration = min(available, max(0, remaining - reserve), exposure_cap)
+            if sport in latest_sports and budget.mode in {
+                "progressive_build", "return_to_baseline"
+            }:
+                exposure_cap += min(15, max(5, round(exposure_cap * 0.1)))
             if session_type == "recovery":
-                prior_key = next(
-                    (
-                        item
-                        for item in reversed(sessions)
-                        if (session_date - item.session_date).days == 1
-                        and item.session_type in {"quality", "long"}
-                    ),
-                    None,
-                )
+                prior_key = next((cap for day, kind, _, cap in reversed(templates)
+                                  if (session_date - day).days == 1
+                                  and kind in {"quality", "long"}), None)
                 if prior_key is not None:
-                    duration = min(duration, max(1, prior_key.duration_min // 2))
+                    exposure_cap = min(exposure_cap, max(1, prior_key // 2))
+            templates.append((session_date, session_type, sport, min(available, exposure_cap)))
+
+        weights = {"long": 1.4, "quality": 1.0, "aerobic": 1.0, "recovery": 0.6}
+        for index, (session_date, session_type, sport, cap) in enumerate(templates):
+            if remaining <= 0:
+                break
+            future_capacity = sum(item[3] for item in templates[index + 1:])
+            future_weight = sum(weights[item[1]] for item in templates[index:])
+            fair_share = ceil(remaining * weights[session_type] / future_weight)
+            duration = min(cap, max(fair_share, remaining - future_capacity))
             if duration <= 0:
                 continue
             intensity = (

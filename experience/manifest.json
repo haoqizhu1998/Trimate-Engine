@@ -181,7 +181,7 @@
     },
     {
       "id": "training-plan",
-      "version": "1.14.0",
+      "version": "1.15.0",
       "source": "skills/training-plan/SKILL.md",
       "required_tools": [
         "get_today_report",
@@ -189,6 +189,8 @@
         "get_sport_calibration",
         "list_plan_execution",
         "list_goals",
+        "get_training_preferences",
+        "list_training_memory",
         "preview_plan",
         "preview_plan_blocks",
         "preview_plan_adjustment",

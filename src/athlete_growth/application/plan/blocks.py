@@ -123,6 +123,7 @@ def add_progression_envelope(
     observed_first_week_minutes: int,
     goal_type: str,
     goal_deadline: date | None,
+    progression_eligible: bool = False,
 ) -> dict[str, object]:
     """Forecast bounded weekly ceilings, never auto-approve future sessions."""
     if observed_first_week_minutes <= 0:
@@ -165,7 +166,11 @@ def add_progression_envelope(
             ceiling = min(maximum, max(1, round(current * 0.8)))
         else:
             phase = "build_forecast"
-            ceiling = current
+            ceiling = (
+                min(maximum, current + min(30, max(10, round(current * 0.08))))
+                if progression_eligible else current
+            )
+            current = ceiling
         enriched.append({
             **raw,
             "phase": phase,
@@ -173,11 +178,16 @@ def add_progression_envelope(
             "ceiling_basis": (
                 "provisional phase reduction from first-week observed-duration preview"
                 if phase in {"event_week_review", "taper_forecast", "recovery_forecast"}
-                else "hold first-week observed-duration ceiling until new evidence is reviewed"
+                else "conditional build ceiling; requires fresh evidence before any prescription"
+                if progression_eligible and index > 0
+                else "hold observed-duration ceiling until new evidence is reviewed"
             ),
             "phase_reduction_is_heuristic": phase in {
                 "event_week_review", "taper_forecast", "recovery_forecast"
             },
+            "conditional_growth_is_heuristic": (
+                phase == "build_forecast" and progression_eligible
+            ),
             "requires_fresh_evidence_and_confirmation": index > 0,
         })
     return {
@@ -186,7 +196,11 @@ def add_progression_envelope(
         "goal_deadline": goal_deadline.isoformat() if goal_deadline else None,
         "progression_interpretation": (
             "Forecast ceilings are planning guardrails, not prescribed load or injury clearance. "
-            "No automatic volume increase is forecast. "
+            "Build-week ceilings may rise only when sustained recent training and current "
+            "safety evidence support it; this is a planning heuristic, not an approved load. "
+            if progression_eligible else
+            "No volume increase is forecast without sustained recent training. "
+        ) + (
             "Phase reductions are provisional heuristics; "
             "future sessions require fresh activity, subjective state and a new confirmed preview."
         ),

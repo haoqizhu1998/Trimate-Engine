@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import unittest
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -108,6 +108,33 @@ class PlanningWorkflowTests(unittest.TestCase):
         self.assertEqual(preview["planning_context"]["recent_7d_minutes"], 20)
         self.assertEqual(preview["planning_context"]["excluded_activity_count"], 1)
         self.assertLessEqual(preview["summary"]["total_minutes"], 20)
+
+    def test_established_training_previews_more_than_last_week_when_ready(self) -> None:
+        goal_id = self._confirmed_goal()
+        self.records.save(CanonicalRecord.create(
+            athlete_id="athlete-1", kind="check-in", occurred_at=self.now,
+            data={"pain": 0, "fatigue": 2, "soreness": 2, "illness": False},
+        ))
+        for age in (2, 4, 6, 9, 11, 13, 16, 18, 20):
+            self.records.save(CanonicalRecord.create(
+                athlete_id="athlete-1", kind="activity",
+                occurred_at=self.now - timedelta(days=age),
+                data={"sport": "running", "duration_min": 50},
+            ))
+        preview = self.workflow.preview_plan(
+            goal_id=goal_id, start_date=date(2026, 10, 27),
+            constraints=TrainingConstraints(
+                {weekday: 60 for weekday in range(7)},
+                frozenset(), 250, ("running",),
+            ),
+        )
+        self.assertEqual(preview["planning_context"]["baseline_mode"], "progressive_build")
+        self.assertEqual(preview["planning_context"]["observed_week_minutes"][:3], [150] * 3)
+        self.assertGreater(preview["summary"]["total_minutes"], 150)
+        self.assertLessEqual(
+            preview["summary"]["total_minutes"],
+            preview["planning_context"]["weekly_volume_budget_minutes"],
+        )
 
     def test_changed_data_invalidates_plan_preview(self) -> None:
         goal_id = self._confirmed_goal()

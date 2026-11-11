@@ -89,7 +89,7 @@ class PlanBlockTests(unittest.TestCase):
         self.assertEqual(cycle["forecast"][1]["weekly_ceiling_min"], first_ceiling)
         self.assertEqual(cycle["forecast"][2]["weekly_ceiling_min"], first_ceiling)
         self.assertTrue(cycle["forecast"][3]["phase_reduction_is_heuristic"])
-        self.assertIn("No automatic volume increase", cycle["progression_interpretation"])
+        self.assertIn("No volume increase is forecast", cycle["progression_interpretation"])
         self.assertEqual(self.records.list_current("athlete-1", kind="training-plan"), [])
         first = self.workflow.confirm_plan(str(preview["preview_id"]), 2)["plan"]
         self.assertEqual(first["block_week_index"], 0)
@@ -117,6 +117,32 @@ class PlanBlockTests(unittest.TestCase):
         third = self.workflow.preview_plan_update(plan_id=str(second["plan_id"]))
         self.assertEqual(third["planning_context"]["constraints"]["focus_sport"], "running")
         self.assertEqual(third["block_week_index"], 2)
+
+    def test_established_baseline_forecasts_conditional_growth(self) -> None:
+        from athlete_growth.application.plan.blocks import add_progression_envelope
+
+        start = date(2026, 10, 27)
+        raw = {
+            "base_constraints": {"max_weekly_minutes": 300},
+            "forecast": [
+                {
+                    "start_date": (start + timedelta(days=7 * index)).isoformat(),
+                    "end_date": (start + timedelta(days=7 * index + 6)).isoformat(),
+                    "status": "current_week_draft" if index == 0 else "forecast_only",
+                }
+                for index in range(5)
+            ],
+        }
+        cycle = add_progression_envelope(
+            raw, observed_first_week_minutes=180,
+            goal_type="sport", goal_deadline=None, progression_eligible=True,
+        )
+        weeks = cycle["forecast"]
+        self.assertGreater(weeks[1]["weekly_ceiling_min"], 180)
+        self.assertGreater(weeks[2]["weekly_ceiling_min"], weeks[1]["weekly_ceiling_min"])
+        self.assertLess(weeks[3]["weekly_ceiling_min"], weeks[2]["weekly_ceiling_min"])
+        self.assertTrue(weeks[1]["conditional_growth_is_heuristic"])
+        self.assertTrue(weeks[1]["requires_fresh_evidence_and_confirmation"])
 
     def test_requires_confirmed_preference_or_explicit_sequence(self) -> None:
         with self.assertRaisesRegex(ValueError, "explicit sequence or confirmed preference"):
