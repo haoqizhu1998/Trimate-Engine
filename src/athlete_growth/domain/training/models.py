@@ -68,6 +68,9 @@ class PlannedSession:
     status: SessionStatus = "draft"
     outcome_note: str | None = None
     session_type: str = "aerobic"
+    distance_m: int | None = None
+    session_order: int = 1
+    brick_id: str | None = None
 
     def transition(
         self, status: SessionStatus, *, outcome_note: str | None = None

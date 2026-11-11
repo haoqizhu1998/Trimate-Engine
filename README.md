@@ -59,7 +59,7 @@ Garmin/设备先把数据上传到产品可访问的来源
 
 ## 安装与初始化
 
-面向朋友可从 [GitHub 预览发布页](https://github.com/haoqizhu1998/Trimate-Engine/releases/tag/V1.4.0)下载唯一的 `Trimate-V1.4.0.zip`，由 WorkBuddy 或支持附件的 GPT 对话识别入口并开始引导；本机数据连接与自动同步仍需宿主具备本机执行能力并由用户授权。包内的 Windows/Mac 安装文件及使用边界见 [普通用户交付](docs/workbuddy-consumer-install.md)。下面是源码开发安装步骤。
+面向朋友可从 [GitHub 预览发布页](https://github.com/haoqizhu1998/Trimate-Engine/releases/tag/V1.5.0)下载唯一的 `Trimate-V1.5.0.zip`，由 WorkBuddy 或支持附件的 GPT 对话识别入口并开始引导；本机数据连接与自动同步仍需宿主具备本机执行能力并由用户授权。包内的 Windows/Mac 安装文件及使用边界见 [普通用户交付](docs/workbuddy-consumer-install.md)。下面是源码开发安装步骤。
 
 日报、周报和每日决策预览可展示夜间 HRV 的最近一晚与滚动对比；测量口径、样本要求和训练解释边界见 [HRV 方法](experience/docs/hrv-recovery-methodology.md)。
 

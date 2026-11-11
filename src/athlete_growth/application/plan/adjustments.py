@@ -28,6 +28,10 @@ def adjust_upcoming_session(
     current = next((item for item in sessions if item.session_id == session_id), None)
     if current is None:
         raise ValueError("planned session not found")
+    if current.brick_id is not None:
+        raise ValueError(
+            "edit both brick legs together with preview_plan_update requested_sessions"
+        )
     if current.session_date < today:
         raise ValueError("past sessions cannot be edited; record the actual workout")
     first_day = week_start
@@ -48,6 +52,7 @@ def adjust_upcoming_session(
         changed = replace(
             current,
             duration_min=new_duration_min,
+            distance_m=None,
             expected_load=float(new_duration_min),
             intensity="easy" if key_downgrade else current.intensity,
             session_type="aerobic" if key_downgrade else current.session_type,
@@ -67,6 +72,7 @@ def adjust_upcoming_session(
         changed = replace(
             current,
             sport=new_sport,
+            distance_m=None,
             duration_min=duration,
             expected_load=float(duration),
             intensity="easy",
@@ -80,11 +86,14 @@ def adjust_upcoming_session(
             raise ValueError("moved session must stay in the current plan week")
         if new_date == current.session_date:
             raise ValueError("moved session needs a different date")
-        if any(item.session_date == new_date for item in sessions if item.session_id != session_id):
-            raise ValueError("moved session collides with another planned session")
+        other_minutes = sum(
+            item.duration_min for item in sessions
+            if item.session_id != session_id and item.session_date == new_date
+        )
         weekday = new_date.weekday()
         if weekday in constraints.unavailable_weekdays or (
-            constraints.available_minutes_by_weekday.get(weekday, 0) < current.duration_min
+            constraints.available_minutes_by_weekday.get(weekday, 0)
+            < current.duration_min + other_minutes
         ):
             raise ValueError("moved session exceeds available time")
         if current.session_type in {"quality", "long"} and any(
@@ -94,17 +103,17 @@ def adjust_upcoming_session(
             if item.session_id != session_id
         ):
             raise ValueError("key sessions need a day between them")
-        changed = replace(current, session_date=new_date)
-    result = tuple(
-        sorted(
-            (
-                changed if item.session_id == session_id else item
-                for item in sessions
-                if item.session_id != session_id or changed is not None
-            ),
-            key=lambda item: (item.session_date, item.session_id),
+        next_order = 1 + max(
+            (item.session_order for item in sessions if item.session_date == new_date),
+            default=0,
         )
-    )
+        changed = replace(current, session_date=new_date, session_order=next_order)
+    revised = [item for item in sessions if item.session_id != session_id]
+    if changed is not None:
+        revised.append(changed)
+    result = tuple(sorted(
+        revised, key=lambda item: (item.session_date, item.session_order, item.session_id)
+    ))
     details = {
         "action": action,
         "session_id": session_id,
@@ -123,4 +132,7 @@ def _session_view(session: PlannedSession) -> dict[str, object]:
         "duration_min": session.duration_min,
         "intensity": session.intensity,
         "session_type": session.session_type,
+        "distance_m": session.distance_m,
+        "session_order": session.session_order,
+        "brick_id": session.brick_id,
     }

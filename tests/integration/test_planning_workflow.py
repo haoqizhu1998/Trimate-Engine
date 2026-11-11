@@ -6,6 +6,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from athlete_growth.adapters.storage import SQLitePlanningDraftRepository, SQLiteRecordStore
+from athlete_growth.application.plan.execution import PlanExecutionService
 from athlete_growth.application.plan.workflow import PlanningWorkflow
 from athlete_growth.domain.records import CanonicalRecord
 from athlete_growth.domain.training import TrainingConstraints
@@ -82,6 +83,92 @@ class PlanningWorkflowTests(unittest.TestCase):
         self.assertEqual(saved[0].data["status"], "approved")
         self.assertTrue(all(item["status"] == "approved" for item in saved[0].data["sessions"]))
         self.assertEqual(self.workflow.list_open_drafts()["drafts"], [])
+
+    def test_exact_double_days_brick_and_discipline_distances_persist(self) -> None:
+        goal_id = self._confirmed_goal()
+        constraints = TrainingConstraints(
+            {1: 80, 2: 110}, frozenset(), 190,
+            ("swimming", "cycling", "running"),
+        )
+        requested = (
+            {"session_date": "2026-10-27", "sport": "swimming", "duration_min": 30,
+             "distance_m": 1500},
+            {"session_date": "2026-10-27", "sport": "running", "duration_min": 40,
+             "distance_m": 7000},
+            {"session_date": "2026-10-28", "sport": "cycling", "duration_min": 80,
+             "distance_m": 30000, "session_type": "brick", "brick_id": "b1"},
+            {"session_date": "2026-10-28", "sport": "running", "duration_min": 20,
+             "distance_m": 3000, "session_type": "brick", "brick_id": "b1"},
+        )
+        preview = self.workflow.preview_plan(
+            goal_id=goal_id, start_date=date(2026, 10, 27),
+            constraints=constraints, requested_sessions=requested,
+        )
+        self.assertEqual(preview["summary"]["total_minutes"], 170)
+        self.assertEqual(preview["summary"]["per_sport_distance_m"], {
+            "swimming": 1500, "cycling": 30000, "running": 10000,
+        })
+        self.assertEqual(preview["summary"]["brick_count"], 1)
+        self.assertEqual(len(preview["summary"]["two_session_days"]), 2)
+        sessions = preview["plan"]["sessions"]
+        self.assertEqual([item["session_order"] for item in sessions], [1, 2, 1, 2])
+        self.assertEqual([item["sport"] for item in sessions[2:]], ["cycling", "running"])
+        saved = self.workflow.confirm_plan(str(preview["preview_id"]), 1)["plan"]
+        self.assertEqual(
+            [(item["distance_m"], item["brick_id"]) for item in saved["sessions"]],
+            [(1500, None), (7000, None), (30000, "b1"), (3000, "b1")],
+        )
+        restored = self.workflow._plan_from_data(saved)
+        self.assertEqual(restored.sessions[3].distance_m, 3000)
+        self.assertEqual(restored.sessions[3].brick_id, "b1")
+        pending = PlanExecutionService(
+            "athlete-1", self.records, timezone_name="UTC",
+            now=self.now + timedelta(days=1),
+        ).list(str(saved["plan_id"]))["pending_reviews"]
+        self.assertEqual(
+            [item["planned_distance_m"] for item in pending], [1500, 7000, 30000, 3000]
+        )
+        self.assertEqual([item["session_order"] for item in pending], [1, 2, 1, 2])
+        self.assertEqual([item["brick_id"] for item in pending], [None, None, "b1", "b1"])
+        shortened = self.workflow.preview_plan_adjustment(
+            plan_id=str(saved["plan_id"]),
+            session_id=str(saved["sessions"][1]["session_id"]),
+            action="shorten", reason="Less time today", new_duration_min=30,
+        )
+        self.assertIsNone(shortened["plan"]["sessions"][1]["distance_m"])
+        self.assertEqual(shortened["summary"]["per_sport_distance_m"]["running"], 3000)
+        with self.assertRaisesRegex(ValueError, "both brick legs"):
+            self.workflow.preview_plan_adjustment(
+                plan_id=str(saved["plan_id"]),
+                session_id=str(saved["sessions"][2]["session_id"]),
+                action="skip", reason="Schedule conflict",
+            )
+
+    def test_exact_schedule_rejects_daily_overflow_and_broken_brick(self) -> None:
+        goal_id = self._confirmed_goal()
+        constraints = TrainingConstraints(
+            {1: 60}, frozenset(), 120, ("cycling", "running"),
+        )
+        with self.assertRaisesRegex(ValueError, "available minutes"):
+            self.workflow.preview_plan(
+                goal_id=goal_id, start_date=date(2026, 10, 27),
+                constraints=constraints,
+                requested_sessions=(
+                    {"session_date": "2026-10-27", "sport": "cycling", "duration_min": 45},
+                    {"session_date": "2026-10-27", "sport": "running", "duration_min": 30},
+                ),
+            )
+        with self.assertRaisesRegex(ValueError, "consecutive cycling then running"):
+            self.workflow.preview_plan(
+                goal_id=goal_id, start_date=date(2026, 10, 27),
+                constraints=constraints,
+                requested_sessions=(
+                    {"session_date": "2026-10-27", "sport": "running",
+                     "duration_min": 20, "session_type": "brick", "brick_id": "b"},
+                    {"session_date": "2026-10-27", "sport": "cycling",
+                     "duration_min": 30, "session_type": "brick", "brick_id": "b"},
+                ),
+            )
 
     def test_plan_baseline_normalizes_sport_and_excludes_flagged_activity(self) -> None:
         goal_id = self._confirmed_goal()

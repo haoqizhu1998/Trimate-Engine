@@ -165,6 +165,9 @@ class PlanExecutionService:
                 "session_date": day.isoformat(),
                 "planned_sport": normalize_sport(session.get("sport")),
                 "planned_duration_min": session.get("duration_min"),
+                "planned_distance_m": session.get("distance_m"),
+                "session_order": session.get("session_order", 1),
+                "brick_id": session.get("brick_id"),
                 "match_state": match_state,
                 "activity_candidates": [
                     {
@@ -173,6 +176,7 @@ class PlanExecutionService:
                         .date().isoformat(),
                         "sport": normalize_sport(activity.data.get("sport")),
                         "duration_min": activity.data.get("duration_min"),
+                        "distance_m": activity.data.get("distance_m"),
                         "same_sport": normalize_sport(activity.data.get("sport"))
                         == normalize_sport(session.get("sport")),
                     }

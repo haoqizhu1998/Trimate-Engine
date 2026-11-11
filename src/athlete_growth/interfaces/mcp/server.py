@@ -155,6 +155,34 @@ _PLANNING_TOOLS: dict[str, tuple[str, dict[str, object], tuple[str, ...]]] = {
             "focus_sport": {"type": "string", "enum": ["running", "cycling", "swimming"]},
             "aerobic_mixing": {"type": "boolean"},
             "use_saved_preferences": {"type": "boolean"},
+            "requested_sessions": {
+                "type": "array",
+                "description": (
+                    "Complete user-specified seven-day schedule. Each item is one sport leg; "
+                    "list order is the default order within a day. A bike-run brick uses two "
+                    "consecutive items with the same brick_id, cycling then running. "
+                    "Distances are exact user inputs in meters; never infer from duration."
+                ),
+                "minItems": 1,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "session_date": {"type": "string", "format": "date"},
+                        "sport": {"type": "string", "enum": ["running", "cycling", "swimming"]},
+                        "duration_min": {"type": "integer", "minimum": 1},
+                        "distance_m": {"type": "integer", "minimum": 1},
+                        "session_order": {"type": "integer", "minimum": 1},
+                        "session_type": {
+                            "type": "string",
+                            "enum": ["aerobic", "recovery", "quality", "long", "brick"],
+                        },
+                        "intensity": {"type": "string", "enum": ["easy", "quality"]},
+                        "objective": {"type": "string"},
+                        "brick_id": {"type": "string"},
+                    },
+                    "required": ["session_date", "sport", "duration_min"],
+                },
+            },
         },
         ("goal_id", "start_date", "available_minutes_by_weekday", "max_weekly_minutes"),
     ),
@@ -181,6 +209,10 @@ _PLANNING_TOOLS: dict[str, tuple[str, dict[str, object], tuple[str, ...]]] = {
         ("plan_id",),
     ),
 }
+
+_PLANNING_TOOLS["preview_plan_update"][1]["requested_sessions"] = (
+    _PLANNING_TOOLS["preview_plan"][1]["requested_sessions"]
+)
 
 _PLANNING_TOOLS["preview_plan_blocks"] = (
     "Preview a configurable multiweek sport-focus rotation. Only the first seven days "
@@ -335,11 +367,17 @@ def _call_planning_tool(
     if name == "review_plan":
         return planning_tools.review_plan(data_home, _required_string(arguments, "plan_id"))
     if name == "preview_plan_update":
+        raw_requested = arguments.get("requested_sessions", [])
+        if not isinstance(raw_requested, list) or any(
+            not isinstance(item, dict) for item in raw_requested
+        ):
+            raise ValueError("requested_sessions must be an array of session objects")
         return planning_tools.preview_plan_update(
             data_home,
             plan_id=_required_string(arguments, "plan_id"),
             goal_id=_optional_string(arguments, "goal_id"),
             start_date=_optional_date(arguments, "start_date"),
+            requested_sessions=tuple(raw_requested),
         )
     if name == "preview_plan_adjustment":
         return planning_tools.preview_plan_adjustment(
@@ -387,6 +425,11 @@ def _call_planning_tool(
             or any(not isinstance(item, str) for item in raw_sports)
         ):
             raise ValueError("plan sports list is invalid")
+        raw_requested = arguments.get("requested_sessions", [])
+        if not isinstance(raw_requested, list) or any(
+            not isinstance(item, dict) for item in raw_requested
+        ):
+            raise ValueError("requested_sessions must be an array of session objects")
         plan_inputs = dict(
             goal_id=_required_string(arguments, "goal_id"),
             start_date=date.fromisoformat(_required_string(arguments, "start_date")),
@@ -400,6 +443,7 @@ def _call_planning_tool(
             focus_sport=_optional_string(arguments, "focus_sport"),
             aerobic_mixing=arguments.get("aerobic_mixing"),
             use_saved_preferences=arguments.get("use_saved_preferences", True),
+            requested_sessions=tuple(raw_requested),
         )
         if name == "preview_plan_blocks":
             raw_sequence = arguments.get("focus_sequence", [])

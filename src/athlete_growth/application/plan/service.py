@@ -30,7 +30,7 @@ class VolumeDecision:
 
 
 class TrainingPlanner:
-    algorithm_version = "training-planner/1.5"
+    algorithm_version = "training-planner/1.6"
 
     @staticmethod
     def volume_decision(

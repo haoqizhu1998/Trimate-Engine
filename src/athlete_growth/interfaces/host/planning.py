@@ -111,11 +111,13 @@ def preview_plan_update(
     plan_id: str,
     goal_id: str | None = None,
     start_date: date | None = None,
+    requested_sessions: tuple[dict[str, object], ...] = (),
 ) -> dict[str, object]:
     return _workflow(data_home).preview_plan_update(
         plan_id=plan_id,
         goal_id=goal_id,
         start_date=start_date,
+        requested_sessions=requested_sessions,
     )
 
 
@@ -156,6 +158,7 @@ def preview_plan(
     focus_sport: str | None = None,
     aerobic_mixing: bool | None = None,
     use_saved_preferences: bool = True,
+    requested_sessions: tuple[dict[str, object], ...] = (),
 ) -> dict[str, object]:
     if (sport is None) == (not sports):
         raise ValueError("provide exactly one sport or sports list")
@@ -179,6 +182,7 @@ def preview_plan(
         goal_id=goal_id,
         start_date=start_date,
         constraints=constraints,
+        requested_sessions=requested_sessions,
     )
 
 
@@ -199,6 +203,7 @@ def preview_plan_blocks(
     focus_sport: str | None = None,
     aerobic_mixing: bool | None = None,
     use_saved_preferences: bool = True,
+    requested_sessions: tuple[dict[str, object], ...] = (),
 ) -> dict[str, object]:
     if (sport is None) == (not sports):
         raise ValueError("provide exactly one sport or sports list")
@@ -224,6 +229,7 @@ def preview_plan_blocks(
         constraints=constraints,
         weeks=weeks,
         focus_sequence=focus_sequence,
+        requested_sessions=requested_sessions,
     )
 
 

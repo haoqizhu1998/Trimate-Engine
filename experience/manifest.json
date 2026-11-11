@@ -181,7 +181,7 @@
     },
     {
       "id": "training-plan",
-      "version": "1.15.0",
+      "version": "1.16.0",
       "source": "skills/training-plan/SKILL.md",
       "required_tools": [
         "get_today_report",

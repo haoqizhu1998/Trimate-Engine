@@ -93,6 +93,33 @@ class PlanningMCPTests(unittest.TestCase):
             )
             self.assertEqual(multisport["unscheduled_sports"], [])
             self.assertIn("seven-day evidence-bounded", multisport["plan_scope"])
+            structured = server.call_tool(
+                "preview_plan",
+                {
+                    "goal_id": goal["goal_id"],
+                    "start_date": today.isoformat(),
+                    "available_minutes_by_weekday": {str(today.weekday()): 90},
+                    "max_weekly_minutes": 90,
+                    "sports": ["cycling", "running"],
+                    "requested_sessions": [
+                        {"session_date": today.isoformat(), "sport": "cycling",
+                         "duration_min": 60, "distance_m": 25000,
+                         "session_type": "brick", "brick_id": "transition-1"},
+                        {"session_date": today.isoformat(), "sport": "running",
+                         "duration_min": 20, "distance_m": 3000,
+                         "session_type": "brick", "brick_id": "transition-1"},
+                    ],
+                },
+                home,
+            )
+            self.assertEqual(structured["summary"]["per_sport_distance_m"], {
+                "cycling": 25000, "running": 3000,
+            })
+            self.assertEqual(structured["summary"]["two_session_days"], [today.isoformat()])
+            self.assertEqual(
+                [item["distance_m"] for item in structured["plan"]["sessions"]],
+                [25000, 3000],
+            )
             reviewed = server.call_tool(
                 "review_plan", {"plan_id": confirmed["plan"]["plan_id"]}, home
             )
