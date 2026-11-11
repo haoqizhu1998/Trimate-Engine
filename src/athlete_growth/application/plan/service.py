@@ -30,7 +30,7 @@ class VolumeDecision:
 
 
 class TrainingPlanner:
-    algorithm_version = "training-planner/1.6"
+    algorithm_version = "training-planner/1.7"
 
     @staticmethod
     def volume_decision(
@@ -300,6 +300,7 @@ class TrainingPlanner:
                     replace(
                         session,
                         duration_min=0,
+                        distance_m=None,
                         intensity="rest",
                         objective="Recovery and reassessment; no training load prescribed.",
                         expected_load=0,
@@ -309,10 +310,17 @@ class TrainingPlanner:
                 sessions.append(
                     replace(
                         session,
-                        duration_min=max(0, session.duration_min // 2),
+                        duration_min=(
+                            max(0, session.duration_min // 2)
+                            if session.duration_min is not None else None
+                        ),
+                        distance_m=None,
                         intensity="easy",
                         objective="Reduced session within current recovery constraints.",
-                        expected_load=round(session.expected_load * 0.4, 1),
+                        expected_load=(
+                            round(session.expected_load * 0.4, 1)
+                            if session.expected_load is not None else None
+                        ),
                     )
                 )
             else:

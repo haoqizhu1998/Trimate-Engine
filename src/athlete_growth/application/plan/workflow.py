@@ -53,6 +53,48 @@ def _constraints_data(constraints: TrainingConstraints) -> dict[str, object]:
     }
 
 
+def _session_summary(
+    sessions: tuple[PlannedSession, ...], allowed_sports: tuple[str, ...]
+) -> dict[str, object]:
+    known_minutes = sum(item.duration_min or 0 for item in sessions)
+    missing_minutes = sum(item.duration_min is None for item in sessions)
+    per_sport_minutes = {
+        sport: (
+            None if any(item.sport == sport and item.duration_min is None for item in sessions)
+            else sum(item.duration_min or 0 for item in sessions if item.sport == sport)
+        ) for sport in allowed_sports
+    }
+    return {
+        "total_minutes": None if missing_minutes else known_minutes,
+        "known_minutes": known_minutes,
+        "duration_missing_sessions": missing_minutes,
+        "per_sport_minutes": per_sport_minutes,
+        "key_sessions": sum(item.session_type in {"quality", "long"} for item in sessions),
+        "distance": (
+            "user-specified distance_m per session; missing distances remain unspecified"
+            if any(item.distance_m is not None for item in sessions)
+            else "not prescribed without a validated personal pace or speed baseline"
+        ),
+        "per_sport_distance_m": {
+            sport: (
+                None if any(item.sport == sport and item.distance_m is None for item in sessions)
+                else sum(item.distance_m or 0 for item in sessions if item.sport == sport)
+            ) for sport in allowed_sports
+        },
+        "known_per_sport_distance_m": {
+            sport: sum(item.distance_m or 0 for item in sessions if item.sport == sport)
+            for sport in allowed_sports
+        },
+        "sessions_with_distance": sum(item.distance_m is not None for item in sessions),
+        "distance_missing_sessions": sum(item.distance_m is None for item in sessions),
+        "brick_count": len({item.brick_id for item in sessions if item.brick_id}),
+        "two_session_days": [
+            day.isoformat() for day in sorted({item.session_date for item in sessions})
+            if sum(item.session_date == day for item in sessions) >= 2
+        ],
+    }
+
+
 class PlanningWorkflow:
     """Draft first, confirm explicitly; never depend on a model conversation as storage."""
 
@@ -456,8 +498,10 @@ class PlanningWorkflow:
         today = self._now().astimezone(self.timezone).date()
         if start_date < today:
             raise ValueError("plan start date cannot be in the past")
-        if constraints.max_weekly_minutes <= 0 or not constraints.allowed_sports:
-            raise ValueError("weekly minutes and at least one sport are required")
+        if not constraints.allowed_sports:
+            raise ValueError("at least one sport is required")
+        if not requested_sessions and constraints.max_weekly_minutes <= 0:
+            raise ValueError("weekly minutes are required for generated plans")
         event_day = (
             goal.deadline
             if goal.goal_type == "race"
@@ -475,7 +519,7 @@ class PlanningWorkflow:
                 constraints,
                 max_weekly_minutes=(
                     constraints.max_weekly_minutes
-                    if constraints.phase_ceiling_preapplied
+                    if constraints.phase_ceiling_preapplied or requested_sessions
                     else max(1, round(constraints.max_weekly_minutes * 0.6))
                 ),
                 unavailable_weekdays=constraints.unavailable_weekdays | {event_day.weekday()},
@@ -487,7 +531,7 @@ class PlanningWorkflow:
                 constraints,
                 max_weekly_minutes=(
                     constraints.max_weekly_minutes
-                    if constraints.phase_ceiling_preapplied
+                    if constraints.phase_ceiling_preapplied or requested_sessions
                     else max(1, round(constraints.max_weekly_minutes * 0.8))
                 ),
                 preferred_quality_weekday=None,
@@ -563,7 +607,10 @@ class PlanningWorkflow:
         volume = planner.volume_decision(
             start_date=start_date,
             recent_sessions=tuple(recent_sessions),
-            constraints=constraints,
+            constraints=(
+                constraints if constraints.max_weekly_minutes > 0
+                else replace(constraints, max_weekly_minutes=100_000)
+            ),
             safety=report.safety,
         )
         if not recent_sessions and not requested_sessions:
@@ -623,6 +670,16 @@ class PlanningWorkflow:
             explicit = requested_sessions_for_week(
                 requested_sessions, start_date=start_date, constraints=constraints
             )
+            unbounded_days = sorted({
+                item.session_date for item in explicit
+                if item.session_date.weekday() not in constraints.available_minutes_by_weekday
+            })
+            if unbounded_days or constraints.max_weekly_minutes == 0:
+                assumptions.append(
+                    "Some daily or weekly available-time limits were not provided. "
+                    "The plan preserves the requested targets, but time capacity cannot "
+                    "be fully verified."
+                )
             if report.safety.level != RiskLevel.LOW and any(
                 item.intensity == "quality" for item in explicit
             ):
@@ -633,10 +690,17 @@ class PlanningWorkflow:
                 change_reason="user-specified seven-day session structure",
             )
             assumptions.append(
-                "Session dates, order, durations and distances are user-specified; "
-                "distance_m is not inferred from pace or speed. Review each leg before approval."
+                "Session dates, order and supplied duration or distance targets are "
+                "user-specified; missing values remain unknown and are not inferred. "
+                "Review each leg before approval."
             )
-            if sum(item.duration_min for item in explicit) > volume.target_minutes:
+            if any(item.duration_min is None for item in explicit):
+                assumptions.append(
+                    "At least one session has no time target. Daily and weekly time limits "
+                    "can only be checked against known minutes; total planned time and "
+                    "volume comparison are unavailable."
+                )
+            elif sum(item.duration_min or 0 for item in explicit) > volume.target_minutes:
                 assumptions.append(
                     "Requested weekly minutes exceed the observed-evidence volume budget; "
                     "review training history, recovery and schedule before approval."
@@ -656,38 +720,7 @@ class PlanningWorkflow:
             created_at=self._now(),
             previous_plan_id=str(previous.data["plan_id"]) if previous else None,
         )
-        per_sport_minutes = {
-            sport: sum(session.duration_min for session in plan.sessions if session.sport == sport)
-            for sport in constraints.allowed_sports
-        }
-        summary = {
-            "total_minutes": sum(per_sport_minutes.values()),
-            "per_sport_minutes": per_sport_minutes,
-            "key_sessions": sum(
-                session.session_type in {"quality", "long"} for session in plan.sessions
-            ),
-            "distance": (
-                "user-specified distance_m per session; missing distances remain unspecified"
-                if any(session.distance_m is not None for session in plan.sessions)
-                else "not prescribed without a validated personal pace or speed baseline"
-            ),
-            "per_sport_distance_m": {
-                sport: sum(
-                    session.distance_m or 0 for session in plan.sessions
-                    if session.sport == sport
-                ) for sport in constraints.allowed_sports
-            },
-            "sessions_with_distance": sum(
-                session.distance_m is not None for session in plan.sessions
-            ),
-            "brick_count": len({
-                session.brick_id for session in plan.sessions if session.brick_id
-            }),
-            "two_session_days": [
-                day.isoformat() for day in sorted({item.session_date for item in plan.sessions})
-                if sum(item.session_date == day for item in plan.sessions) >= 2
-            ],
-        }
+        summary = _session_summary(plan.sessions, constraints.allowed_sports)
         calibration_service = SportCalibrationService(self.athlete_id, self.records, today=today)
         calibration_by_sport = {
             sport: calibration_service.get(sport) for sport in constraints.allowed_sports
@@ -748,6 +781,12 @@ class PlanningWorkflow:
             "observed_week_minutes": list(volume.observed_week_minutes),
             "typical_prior_minutes": volume.typical_prior_minutes,
             "weekly_volume_budget_minutes": volume.target_minutes,
+            "weekly_time_limit_known": constraints.max_weekly_minutes > 0,
+            "daily_time_limits_missing_days": [
+                day.isoformat()
+                for day in sorted({item.session_date for item in plan.sessions})
+                if day.weekday() not in constraints.available_minutes_by_weekday
+            ],
             "session_structure_source": (
                 "user_specified" if requested_sessions else "generated"
             ),
@@ -877,17 +916,39 @@ class PlanningWorkflow:
         summary = preview["summary"]
         assert isinstance(summary, dict)
         planning_context = preview.get("planning_context")
-        cycle = add_progression_envelope(
-            cycle,
-            observed_first_week_minutes=int(summary["total_minutes"]),
-            goal_type=str(goal_record.data.get("goal_type")),
-            goal_deadline=goal_deadline,
-            progression_eligible=(
-                isinstance(planning_context, dict)
-                and planning_context.get("baseline_mode")
-                in {"progressive_build", "return_to_baseline"}
-            ),
-        )
+        if summary["total_minutes"] is None or constraints.max_weekly_minutes <= 0:
+            forecast = cycle["forecast"]
+            assert isinstance(forecast, list)
+            cycle = {
+                **cycle,
+                "forecast": [
+                    {
+                        **entry,
+                        "weekly_ceiling_min": None,
+                        "ceiling_basis": (
+                            "first-week time or weekly time limit is unspecified; "
+                            "review before forecasting"
+                        ),
+                    }
+                    for entry in forecast if isinstance(entry, dict)
+                ],
+                "progression_interpretation": (
+                    "First-week duration or the weekly time limit is incomplete, so no "
+                    "numeric future-week volume ceiling is forecast. Recheck each week."
+                ),
+            }
+        else:
+            cycle = add_progression_envelope(
+                cycle,
+                observed_first_week_minutes=int(summary["total_minutes"]),
+                goal_type=str(goal_record.data.get("goal_type")),
+                goal_deadline=goal_deadline,
+                progression_eligible=(
+                    isinstance(planning_context, dict)
+                    and planning_context.get("baseline_mode")
+                    in {"progressive_build", "return_to_baseline"}
+                ),
+            )
         draft = self._draft("plan", str(preview["preview_id"]))
         scope = "first seven days are a confirmable draft; later weeks are focus forecasts only"
         updated = PlanningDraft(
@@ -1013,30 +1074,7 @@ class PlanningWorkflow:
             change_reason=reason.strip(),
             previous_plan_id=plan_id,
         )
-        per_sport_minutes = {
-            sport: sum(item.duration_min for item in sessions if item.sport == sport)
-            for sport in constraints.allowed_sports
-        }
-        summary = {
-            "total_minutes": sum(per_sport_minutes.values()),
-            "per_sport_minutes": per_sport_minutes,
-            "key_sessions": sum(item.session_type in {"quality", "long"} for item in sessions),
-            "distance": (
-                "user-specified distance_m per session; missing distances remain unspecified"
-                if any(item.distance_m is not None for item in sessions)
-                else "not prescribed without a validated personal pace or speed baseline"
-            ),
-            "per_sport_distance_m": {
-                sport: sum(item.distance_m or 0 for item in sessions if item.sport == sport)
-                for sport in constraints.allowed_sports
-            },
-            "sessions_with_distance": sum(item.distance_m is not None for item in sessions),
-            "brick_count": len({item.brick_id for item in sessions if item.brick_id}),
-            "two_session_days": [
-                day.isoformat() for day in sorted({item.session_date for item in sessions})
-                if sum(item.session_date == day for item in sessions) >= 2
-            ],
-        }
+        summary = _session_summary(sessions, constraints.allowed_sports)
         adjustment = {
             **change,
             "reason": reason.strip(),
@@ -1307,10 +1345,12 @@ class PlanningWorkflow:
             return preview
         prior_summary = prior.data.get("summary")
         next_summary = preview["summary"]
-        prior_minutes = (
-            int(prior_summary.get("total_minutes", 0)) if isinstance(prior_summary, dict) else None
+        prior_total = (
+            prior_summary.get("total_minutes") if isinstance(prior_summary, dict) else None
         )
-        new_minutes = int(next_summary["total_minutes"]) if isinstance(next_summary, dict) else None
+        new_total = next_summary.get("total_minutes") if isinstance(next_summary, dict) else None
+        prior_minutes = int(prior_total) if prior_total is not None else None
+        new_minutes = int(new_total) if new_total is not None else None
         comparison = {
             "previous_plan_id": plan_id,
             "previous_goal_id": prior.data.get("goal_id"),
@@ -1458,7 +1498,9 @@ class PlanningWorkflow:
                 actual_minutes = None
             expected = planned[0] if planned else None
             expected_minutes = (
-                int(str(expected.get("duration_min", 0))) if expected is not None else None
+                int(str(expected["duration_min"]))
+                if expected is not None and expected.get("duration_min") is not None
+                else None
             )
             if expected is None or (
                 actual_sport != normalize_sport(expected.get("sport"))
@@ -1638,10 +1680,15 @@ class PlanningWorkflow:
                 session_id=str(item["session_id"]),
                 session_date=date.fromisoformat(str(item["session_date"])),
                 sport=str(item["sport"]),
-                duration_min=int(item["duration_min"]),
+                duration_min=(
+                    int(item["duration_min"]) if item.get("duration_min") is not None else None
+                ),
                 intensity=str(item["intensity"]),
                 objective=str(item["objective"]),
-                expected_load=float(item["expected_load"]),
+                expected_load=(
+                    float(item["expected_load"])
+                    if item.get("expected_load") is not None else None
+                ),
                 session_type=str(item.get("session_type", "aerobic")),
                 distance_m=int(item["distance_m"]) if item.get("distance_m") is not None else None,
                 session_order=int(item.get("session_order", 1)),

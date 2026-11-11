@@ -148,8 +148,8 @@ def preview_plan(
     *,
     goal_id: str,
     start_date: date,
-    available_minutes_by_weekday: dict[int, int],
-    max_weekly_minutes: int,
+    available_minutes_by_weekday: dict[int, int] | None = None,
+    max_weekly_minutes: int | None = None,
     sport: str | None = None,
     sports: tuple[str, ...] = (),
     unavailable_weekdays: tuple[int, ...] = (),
@@ -168,9 +168,9 @@ def preview_plan(
     if len(set(selected_sports)) != len(selected_sports):
         raise ValueError("plan sports must not repeat")
     constraints = TrainingConstraints(
-        available_minutes_by_weekday=available_minutes_by_weekday,
+        available_minutes_by_weekday=available_minutes_by_weekday or {},
         unavailable_weekdays=frozenset(unavailable_weekdays),
-        max_weekly_minutes=max_weekly_minutes,
+        max_weekly_minutes=max_weekly_minutes or 0,
         allowed_sports=selected_sports,
         preferred_quality_weekday=preferred_quality_weekday,
         preferred_long_weekday=preferred_long_weekday,
@@ -191,9 +191,9 @@ def preview_plan_blocks(
     *,
     goal_id: str,
     start_date: date,
-    available_minutes_by_weekday: dict[int, int],
-    max_weekly_minutes: int,
     weeks: int,
+    available_minutes_by_weekday: dict[int, int] | None = None,
+    max_weekly_minutes: int | None = None,
     sport: str | None = None,
     sports: tuple[str, ...] = (),
     focus_sequence: tuple[str, ...] = (),
@@ -213,9 +213,9 @@ def preview_plan_blocks(
     if len(set(selected_sports)) != len(selected_sports):
         raise ValueError("plan sports must not repeat")
     constraints = TrainingConstraints(
-        available_minutes_by_weekday=available_minutes_by_weekday,
+        available_minutes_by_weekday=available_minutes_by_weekday or {},
         unavailable_weekdays=frozenset(unavailable_weekdays),
-        max_weekly_minutes=max_weekly_minutes,
+        max_weekly_minutes=max_weekly_minutes or 0,
         allowed_sports=selected_sports,
         preferred_quality_weekday=preferred_quality_weekday,
         preferred_long_weekday=preferred_long_weekday,

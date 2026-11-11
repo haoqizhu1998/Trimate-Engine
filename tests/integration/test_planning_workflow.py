@@ -136,7 +136,8 @@ class PlanningWorkflowTests(unittest.TestCase):
             action="shorten", reason="Less time today", new_duration_min=30,
         )
         self.assertIsNone(shortened["plan"]["sessions"][1]["distance_m"])
-        self.assertEqual(shortened["summary"]["per_sport_distance_m"]["running"], 3000)
+        self.assertIsNone(shortened["summary"]["per_sport_distance_m"]["running"])
+        self.assertEqual(shortened["summary"]["known_per_sport_distance_m"]["running"], 3000)
         with self.assertRaisesRegex(ValueError, "both brick legs"):
             self.workflow.preview_plan_adjustment(
                 plan_id=str(saved["plan_id"]),
@@ -168,6 +169,63 @@ class PlanningWorkflowTests(unittest.TestCase):
                     {"session_date": "2026-10-27", "sport": "cycling",
                      "duration_min": 30, "session_type": "brick", "brick_id": "b"},
                 ),
+            )
+
+    def test_distance_only_and_time_only_targets_remain_unspecified_where_missing(self) -> None:
+        goal_id = self._confirmed_goal()
+        constraints = TrainingConstraints(
+            {}, frozenset(), 0, ("cycling", "running", "swimming")
+        )
+        requested = (
+            {"session_date": "2026-10-27", "sport": "cycling",
+             "distance_m": 40000, "session_type": "brick", "brick_id": "transition"},
+            {"session_date": "2026-10-27", "sport": "running",
+             "distance_m": 5000, "session_type": "brick", "brick_id": "transition"},
+            {"session_date": "2026-10-28", "sport": "swimming", "duration_min": 45},
+        )
+        preview = self.workflow.preview_plan(
+            goal_id=goal_id, start_date=date(2026, 10, 27),
+            constraints=constraints, requested_sessions=requested,
+        )
+        sessions = preview["plan"]["sessions"]
+        self.assertEqual([item["duration_min"] for item in sessions], [None, None, 45])
+        self.assertEqual([item["distance_m"] for item in sessions], [40000, 5000, None])
+        self.assertEqual([item["expected_load"] for item in sessions], [None, None, 45.0])
+        self.assertIsNone(preview["summary"]["total_minutes"])
+        self.assertEqual(preview["summary"]["known_minutes"], 45)
+        self.assertEqual(preview["summary"]["duration_missing_sessions"], 2)
+        self.assertEqual(preview["summary"]["per_sport_minutes"], {
+            "cycling": None, "running": None, "swimming": 45,
+        })
+        self.assertEqual(preview["summary"]["per_sport_distance_m"], {
+            "cycling": 40000, "running": 5000, "swimming": None,
+        })
+        self.assertFalse(preview["planning_context"]["weekly_time_limit_known"])
+        self.assertEqual(len(preview["planning_context"]["daily_time_limits_missing_days"]), 2)
+        saved = self.workflow.confirm_plan(str(preview["preview_id"]), 1)["plan"]
+        restored = self.workflow._plan_from_data(saved)
+        self.assertIsNone(restored.sessions[0].duration_min)
+        self.assertEqual(restored.sessions[0].distance_m, 40000)
+        revised = self.workflow.preview_plan_update(
+            plan_id=str(saved["plan_id"]), start_date=date(2026, 10, 27),
+            requested_sessions=requested,
+        )
+        self.assertIsNone(revised["summary"]["total_minutes"])
+        self.assertIsNone(revised["replanning_context"]["minutes_change"])
+        blocks = self.workflow.preview_plan_blocks(
+            goal_id=goal_id, start_date=date(2026, 10, 27),
+            constraints=constraints, weeks=2,
+            focus_sequence=("cycling", "running"), requested_sessions=requested,
+        )
+        self.assertIsNone(blocks["block_cycle"]["forecast"][1]["weekly_ceiling_min"])
+
+    def test_session_requires_a_time_or_distance_target(self) -> None:
+        goal_id = self._confirmed_goal()
+        with self.assertRaisesRegex(ValueError, "duration_min or distance_m"):
+            self.workflow.preview_plan(
+                goal_id=goal_id, start_date=date(2026, 10, 27),
+                constraints=TrainingConstraints({}, frozenset(), 0, ("running",)),
+                requested_sessions=({"session_date": "2026-10-27", "sport": "running"},),
             )
 
     def test_plan_baseline_normalizes_sport_and_excludes_flagged_activity(self) -> None:

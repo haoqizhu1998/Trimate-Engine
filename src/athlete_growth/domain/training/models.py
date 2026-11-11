@@ -61,10 +61,10 @@ class PlannedSession:
     session_id: str
     session_date: date
     sport: str
-    duration_min: int
+    duration_min: int | None
     intensity: str
     objective: str
-    expected_load: float
+    expected_load: float | None
     status: SessionStatus = "draft"
     outcome_note: str | None = None
     session_type: str = "aerobic"

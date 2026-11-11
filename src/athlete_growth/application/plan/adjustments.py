@@ -44,6 +44,8 @@ def adjust_upcoming_session(
     elif action == "shorten":
         if new_date is not None or new_sport is not None:
             raise ValueError("shorten only accepts a smaller duration")
+        if current.duration_min is None:
+            raise ValueError("duration is unspecified; revise the full session structure")
         if type(new_duration_min) is not int or not 0 < new_duration_min < current.duration_min:
             raise ValueError("shorten only accepts a smaller duration")
         key_downgrade = current.session_type in {"quality", "long"} and (
@@ -61,6 +63,8 @@ def adjust_upcoming_session(
             else current.objective,
         )
     elif action == "substitute":
+        if current.duration_min is None:
+            raise ValueError("duration is unspecified; revise the full session structure")
         if new_date is not None or new_sport not in constraints.allowed_sports:
             raise ValueError("substitute sport must be in the plan")
         if new_sport == current.sport:
@@ -87,13 +91,14 @@ def adjust_upcoming_session(
         if new_date == current.session_date:
             raise ValueError("moved session needs a different date")
         other_minutes = sum(
-            item.duration_min for item in sessions
+            item.duration_min or 0 for item in sessions
             if item.session_id != session_id and item.session_date == new_date
         )
         weekday = new_date.weekday()
+        limit = constraints.available_minutes_by_weekday.get(weekday)
         if weekday in constraints.unavailable_weekdays or (
-            constraints.available_minutes_by_weekday.get(weekday, 0)
-            < current.duration_min + other_minutes
+            limit is not None
+            and limit < (current.duration_min or 0) + other_minutes
         ):
             raise ValueError("moved session exceeds available time")
         if current.session_type in {"quality", "long"} and any(
@@ -119,7 +124,12 @@ def adjust_upcoming_session(
         "session_id": session_id,
         "before": _session_view(current),
         "after": _session_view(changed) if changed is not None else None,
-        "weekly_minutes_change": (changed.duration_min if changed else 0) - current.duration_min,
+        "weekly_minutes_change": (
+            (changed.duration_min if changed else 0) - current.duration_min
+            if current.duration_min is not None and
+            (changed is None or changed.duration_min is not None)
+            else None
+        ),
         "makeup_session_added": False,
     }
     return result, details

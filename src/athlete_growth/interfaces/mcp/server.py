@@ -135,9 +135,18 @@ _PLANNING_TOOLS: dict[str, tuple[str, dict[str, object], tuple[str, ...]]] = {
             "available_minutes_by_weekday": {
                 "type": "object",
                 "additionalProperties": {"type": "integer", "minimum": 0},
-                "description": "Weekday 0=Monday through 6=Sunday, mapped to available minutes.",
+                "description": (
+                    "Optional for requested_sessions; weekday 0=Monday through 6=Sunday. "
+                    "Missing days have unknown time capacity, not unlimited verified capacity."
+                ),
             },
-            "max_weekly_minutes": {"type": "integer", "minimum": 1},
+            "max_weekly_minutes": {
+                "type": "integer", "minimum": 1,
+                "description": (
+                    "Optional for requested_sessions; required for automatic generation. "
+                    "When absent, weekly time capacity cannot be verified."
+                ),
+            },
             "sport": {"type": "string", "enum": ["running", "cycling", "swimming"]},
             "sports": {
                 "type": "array",
@@ -161,7 +170,8 @@ _PLANNING_TOOLS: dict[str, tuple[str, dict[str, object], tuple[str, ...]]] = {
                     "Complete user-specified seven-day schedule. Each item is one sport leg; "
                     "list order is the default order within a day. A bike-run brick uses two "
                     "consecutive items with the same brick_id, cycling then running. "
-                    "Distances are exact user inputs in meters; never infer from duration."
+                    "Each leg needs duration_min or distance_m; both are optional relative "
+                    "to each other. Distances are meters. Never infer the missing target."
                 ),
                 "minItems": 1,
                 "items": {
@@ -180,11 +190,15 @@ _PLANNING_TOOLS: dict[str, tuple[str, dict[str, object], tuple[str, ...]]] = {
                         "objective": {"type": "string"},
                         "brick_id": {"type": "string"},
                     },
-                    "required": ["session_date", "sport", "duration_min"],
+                    "required": ["session_date", "sport"],
+                    "anyOf": [
+                        {"required": ["duration_min"]},
+                        {"required": ["distance_m"]},
+                    ],
                 },
             },
         },
-        ("goal_id", "start_date", "available_minutes_by_weekday", "max_weekly_minutes"),
+        ("goal_id", "start_date"),
     ),
     "confirm_plan": (
         "Save a previously displayed plan preview only after the user explicitly "
@@ -403,7 +417,7 @@ def _call_planning_tool(
             and type(arguments["use_saved_preferences"]) is not bool
         ):
             raise ValueError("use_saved_preferences must be a boolean")
-        raw_available = arguments["available_minutes_by_weekday"]
+        raw_available = arguments.get("available_minutes_by_weekday", {})
         if not isinstance(raw_available, dict):
             raise ValueError("availability must be an object")
         available: dict[int, int] = {}
@@ -434,7 +448,10 @@ def _call_planning_tool(
             goal_id=_required_string(arguments, "goal_id"),
             start_date=date.fromisoformat(_required_string(arguments, "start_date")),
             available_minutes_by_weekday=available,
-            max_weekly_minutes=_required_int(arguments, "max_weekly_minutes"),
+            max_weekly_minutes=(
+                _required_int(arguments, "max_weekly_minutes")
+                if "max_weekly_minutes" in arguments else None
+            ),
             sport=_required_string(arguments, "sport") if "sport" in arguments else None,
             sports=tuple(raw_sports),
             unavailable_weekdays=tuple(raw_unavailable),

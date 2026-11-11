@@ -120,6 +120,24 @@ class PlanningMCPTests(unittest.TestCase):
                 [item["distance_m"] for item in structured["plan"]["sessions"]],
                 [25000, 3000],
             )
+            distance_only = server.call_tool(
+                "preview_plan",
+                {
+                    "goal_id": goal["goal_id"],
+                    "start_date": today.isoformat(),
+                    "sport": "running",
+                    "requested_sessions": [
+                        {"session_date": today.isoformat(), "sport": "running",
+                         "distance_m": 10000},
+                    ],
+                },
+                home,
+            )
+            self.assertIsNone(distance_only["plan"]["sessions"][0]["duration_min"])
+            self.assertIsNone(distance_only["summary"]["total_minutes"])
+            self.assertEqual(distance_only["summary"]["per_sport_distance_m"], {
+                "running": 10000,
+            })
             reviewed = server.call_tool(
                 "review_plan", {"plan_id": confirmed["plan"]["plan_id"]}, home
             )

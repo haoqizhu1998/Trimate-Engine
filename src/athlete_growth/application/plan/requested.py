@@ -33,19 +33,22 @@ def requested_sessions_for_week(
         if sport not in constraints.allowed_sports:
             raise ValueError("requested sport must be among allowed sports")
         duration = raw.get("duration_min")
-        if type(duration) is not int or duration <= 0:
-            raise ValueError("requested duration_min must be a positive integer")
+        if duration is not None and (type(duration) is not int or duration <= 0):
+            raise ValueError("duration_min must be a positive integer when provided")
         distance = raw.get("distance_m")
         if distance is not None and (type(distance) is not int or distance <= 0):
             raise ValueError("distance_m must be a positive integer in meters")
+        if duration is None and distance is None:
+            raise ValueError("each requested session needs duration_min or distance_m")
         order = raw.get("session_order", max(day_orders.get(day, set()), default=0) + 1)
         if type(order) is not int or order < 1 or order in day_orders.setdefault(day, set()):
             raise ValueError("session_order must be a distinct positive number for the day")
         day_orders[day].add(order)
         if day.weekday() in constraints.unavailable_weekdays:
             raise ValueError("requested session falls on an unavailable day")
-        day_minutes[day] = day_minutes.get(day, 0) + duration
-        if day_minutes[day] > constraints.available_minutes_by_weekday.get(day.weekday(), 0):
+        day_minutes[day] = day_minutes.get(day, 0) + (duration or 0)
+        daily_limit = constraints.available_minutes_by_weekday.get(day.weekday())
+        if daily_limit is not None and day_minutes[day] > daily_limit:
             raise ValueError("requested sessions exceed available minutes for the day")
         session_type = raw.get("session_type", "aerobic")
         if session_type not in {"aerobic", "recovery", "quality", "long", "brick"}:
@@ -70,7 +73,7 @@ def requested_sessions_for_week(
             duration_min=duration,
             intensity=str(intensity),
             objective=objective.strip(),
-            expected_load=float(duration),
+            expected_load=float(duration) if duration is not None else None,
             session_type=str(session_type),
             distance_m=distance,
             session_order=order,
@@ -79,7 +82,8 @@ def requested_sessions_for_week(
         result.append(session)
         if brick_id is not None:
             bricks.setdefault(brick_id, []).append(session)
-    if sum(day_minutes.values()) > constraints.max_weekly_minutes:
+    if (constraints.max_weekly_minutes
+        and sum(day_minutes.values()) > constraints.max_weekly_minutes):
         raise ValueError("requested sessions exceed max_weekly_minutes")
     for brick_id, legs in bricks.items():
         legs = sorted(legs, key=lambda item: item.session_order)
