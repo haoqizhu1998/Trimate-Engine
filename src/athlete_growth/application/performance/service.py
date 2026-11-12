@@ -184,24 +184,133 @@ class EndurancePerformanceService:
             raw_gaps = detail["data_gaps"]
             assert isinstance(raw_gaps, list)
             raw_gaps.append("recorded samples are cached but not yet analyzed point by point")
+        pacing = self._lap_pacing_pattern(
+            sport,
+            lap_results,
+            quality_flags=record.quality_flags,
+            truncated=bool(detail["laps_truncated"]),
+            session_type=record.data.get("session_type"),
+        )
+        similar = self._similar_sessions(record, sport, summary)
         return {
             "record_id": record_id,
             "sport": sport,
             "summary": summary,
             "lap_splits": lap_results,
-            "lap_pacing_pattern": self._lap_pacing_pattern(
-                sport,
-                lap_results,
-                quality_flags=record.quality_flags,
-                truncated=bool(detail["laps_truncated"]),
-                session_type=record.data.get("session_type"),
+            "lap_pacing_pattern": pacing,
+            "similar_sessions": similar,
+            "analysis_sections": self._analysis_sections(
+                record, detail, summary, pacing, similar
             ),
-            "similar_sessions": self._similar_sessions(record, sport, summary),
             "metrics": metrics,
             "quality_flags": detail["quality_flags"],
             "data_gaps": detail["data_gaps"],
             "evidence": {"record_id": record_id, "source_count": detail["source_count"]},
             "interpretation": "descriptive only; no threshold, race prediction or causal claim",
+        }
+
+    @staticmethod
+    def _analysis_sections(
+        record: CanonicalRecord,
+        detail: dict[str, object],
+        summary: dict[str, float],
+        pacing: dict[str, object],
+        similar: dict[str, object],
+    ) -> dict[str, object]:
+        metrics = detail["metrics"]
+        assert isinstance(metrics, dict)
+        sync = detail["detail_sync"]
+        assert isinstance(sync, dict)
+        gaps = detail["data_gaps"]
+        assert isinstance(gaps, list)
+        external_keys = (
+            "duration_min", "distance_m", "avg_speed_mps", "avg_power_w",
+            "avg_cadence_rpm", "elevation_gain_m",
+        )
+        internal_keys = ("avg_hr", "max_hr", "training_load")
+        external = {key: metrics[key] for key in external_keys if key in metrics}
+        internal = {key: metrics[key] for key in internal_keys if key in metrics}
+        speed_check: dict[str, object] | None = None
+        duration = _number(metrics, "duration_min")
+        distance = _number(metrics, "distance_m")
+        device_speed = _number(metrics, "avg_speed_mps")
+        if (summary and duration and distance and device_speed):
+            calculated_speed = distance / (duration * 60)
+            difference = (calculated_speed / device_speed - 1) * 100
+            speed_check = {
+                "calculated_mps": round(calculated_speed, 3),
+                "recorded_avg_mps": round(device_speed, 3),
+                "difference_percent": round(difference, 2),
+                "status": "different" if abs(difference) > 2 else "close",
+                "interpretation": (
+                    "The two speed values may use different moving or elapsed time bases; "
+                    "do not explain the difference as a fitness change."
+                ),
+            }
+        session_type = record.data.get("session_type")
+        return {
+            "session": {
+                "status": "observed",
+                "occurred_at": record.occurred_at.isoformat(),
+                "sport": detail["sport"],
+                "name": metrics.get("name"),
+                "record_id": record.record_id,
+            },
+            "external_output": {
+                "status": "observed" if external else "insufficient",
+                "metrics": {**external, **summary},
+                "speed_cross_check": speed_check,
+                "calculation_basis": (
+                    "pace or speed is calculated from stored duration_min and distance_m; "
+                    "moving versus elapsed duration may differ by source"
+                ) if summary else None,
+            },
+            "internal_response": {
+                "status": "observed_without_personal_reference" if internal else "insufficient",
+                "metrics": internal,
+                "limitation": (
+                    "averages and device load alone cannot establish intensity zones, "
+                    "fatigue, recovery or training effect; athlete RPE and symptoms are separate"
+                ),
+            },
+            "within_session_pattern": {
+                "status": pacing["status"],
+                "metric": pacing["metric"],
+                "direction": pacing.get("direction"),
+                "difference_percent": pacing["difference_percent"],
+                "paired_lap_observations": pacing.get("paired_lap_observations", {}),
+                "lap_count": pacing["lap_count"],
+                "limitation": (
+                    "lap halves are descriptive; they do not prove fatigue, pacing error "
+                    "or fitness change"
+                ),
+            },
+            "history_reference": {
+                "status": similar["status"],
+                "sample_count": similar["sample_count"],
+                "metric": similar["metric"],
+                "direction": similar.get("direction"),
+                "difference_percent": similar["difference_percent"],
+                "limitation": (
+                    "prior sessions are only similar in recorded sport, duration and "
+                    "distance; effort, terrain, weather and intent are uncontrolled"
+                ),
+            },
+            "training_intent": {
+                "status": "recorded" if isinstance(session_type, str) and session_type
+                else "not_recorded",
+                "recorded_session_type": session_type if isinstance(session_type, str)
+                else None,
+                "plan_execution": "not_assessed; compare with a user-confirmed plan session",
+            },
+            "evidence_quality": {
+                "status": "flagged" if record.quality_flags else "unflagged",
+                "quality_flags": list(record.quality_flags),
+                "sources": sorted({item.source for item in record.evidence}),
+                "detail_status": sync.get("status"),
+                "recorded_sample_count": sync.get("recorded_sample_count", 0),
+                "data_gaps": gaps,
+            },
         }
 
     @staticmethod
@@ -250,6 +359,18 @@ class EndurancePerformanceService:
         half = len(values) // 2
         first = median(values[:half])
         second = median(values[half:])
+        paired_lap_observations: dict[str, dict[str, float]] = {}
+        for field in ("avg_hr", "avg_power_w"):
+            measurements = [_number(lap, field) for lap in laps]
+            if all(value is not None and value > 0 for value in measurements):
+                valid = [float(value) for value in measurements if value is not None]
+                before = median(valid[:half])
+                after = median(valid[half:])
+                paired_lap_observations[field] = {
+                    "first_half_median": round(before, 2),
+                    "second_half_median": round(after, 2),
+                    "difference": round(after - before, 2),
+                }
         return {
             "status": "descriptive",
             "metric": metric,
@@ -257,10 +378,17 @@ class EndurancePerformanceService:
             "first_half_median": round(first, 3),
             "second_half_median": round(second, 3),
             "difference_percent": round((second / first - 1) * 100, 2),
+            "paired_lap_observations": paired_lap_observations,
+            "direction": (
+                "second_half_metric_higher" if second > first
+                else "second_half_metric_lower" if second < first
+                else "no_median_difference"
+            ),
             "selection": "equal count of first and second laps, each within 20% of median distance",
             "limitations": [
                 "lap averages do not identify interval steps, pauses or terrain changes",
                 "difference is second-half minus first-half; for pace, higher is slower",
+                "heart-rate or power medians, when present, are observations, not causal proof",
                 "within-session split pattern is not a fitness trend or diagnosis",
             ],
         }
@@ -293,11 +421,13 @@ class EndurancePerformanceService:
             return {**empty, "limitations": ["comparable sport, duration or distance unavailable"]}
         if record.quality_flags:
             return {**empty, "limitations": ["current activity has quality flags"]}
+        source_names = {item.source for item in record.evidence}
         peers: list[tuple[CanonicalRecord, float]] = []
         for candidate in self.records.list_current(self.athlete_id, kind="activity"):
             if (
                 candidate.record_id == record.record_id
                 or candidate.quality_flags
+                or {item.source for item in candidate.evidence} != source_names
                 or not record.occurred_at - timedelta(days=180)
                 <= candidate.occurred_at < record.occurred_at
                 or normalize_sport(candidate.data.get("sport")) != sport
@@ -315,7 +445,7 @@ class EndurancePerformanceService:
                 continue
             current_type = record.data.get("session_type")
             candidate_type = candidate.data.get("session_type")
-            if current_type and candidate_type and current_type != candidate_type:
+            if current_type != candidate_type:
                 continue
             value = _performance_metrics(sport, candidate_duration, candidate_distance)
             if metric in value:
@@ -339,9 +469,16 @@ class EndurancePerformanceService:
                 (current_metrics[metric] / median(value for _, value in peers) - 1) * 100,
                 2,
             ),
+            "direction": (
+                "current_metric_higher"
+                if current_metrics[metric] > median(value for _, value in peers)
+                else "current_metric_lower"
+                if current_metrics[metric] < median(value for _, value in peers)
+                else "no_median_difference"
+            ),
             "evidence_ids": [item.record_id for item, _ in peers],
             "selection": (
-                "up to 20 most recent, same source sport; prior 180 days; "
+                "up to 20 most recent, same source and sport; prior 180 days; "
                 "duration and distance within 20%"
             ),
             "limitations": [
@@ -494,6 +631,8 @@ class EndurancePerformanceService:
         actual_sport = normalize_sport(activity.data.get("sport"))
         planned_duration = session.get("duration_min")
         actual_duration = _number(activity.data, "duration_min")
+        planned_distance = session.get("distance_m")
+        actual_distance = _number(activity.data, "distance_m")
         planned_day = str(session.get("session_date"))
         actual_day = activity.occurred_at.astimezone(self.timezone).date().isoformat()
         delta = (
@@ -503,9 +642,18 @@ class EndurancePerformanceService:
             and actual_duration is not None
             else None
         )
+        distance_delta = (
+            round(actual_distance - float(planned_distance), 2)
+            if isinstance(planned_distance, (int, float))
+            and not isinstance(planned_distance, bool)
+            and actual_distance is not None
+            else None
+        )
         gaps = []
         if actual_duration is None:
             gaps.append("actual duration unavailable")
+        if actual_distance is None:
+            gaps.append("actual distance unavailable")
         if planned_sport == "other" or actual_sport == "other":
             gaps.append("sport identity is not normalized")
         return {
@@ -516,16 +664,19 @@ class EndurancePerformanceService:
                 "date": planned_day,
                 "sport": planned_sport,
                 "duration_min": planned_duration,
+                "distance_m": planned_distance,
                 "intensity": session.get("intensity"),
             },
             "actual": {
                 "date": actual_day,
                 "sport": actual_sport,
                 "duration_min": actual_duration,
+                "distance_m": actual_distance,
             },
             "same_day": planned_day == actual_day,
             "same_sport": planned_sport == actual_sport and planned_sport != "other",
             "duration_delta_min": delta,
+            "distance_delta_m": distance_delta,
             "quality_flags": list(activity.quality_flags),
             "data_gaps": gaps,
             "interpretation": (

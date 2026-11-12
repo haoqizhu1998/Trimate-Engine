@@ -4,7 +4,7 @@ import unittest
 from datetime import UTC, datetime, timedelta
 
 from athlete_growth.application.performance import EndurancePerformanceService
-from athlete_growth.domain.records import CanonicalRecord
+from athlete_growth.domain.records import CanonicalRecord, EvidenceRef
 
 
 class MemoryRecords:
@@ -65,6 +65,30 @@ class EndurancePerformanceTests(unittest.TestCase):
         self.assertEqual(triathlon["summary"], {})
         self.assertIn("segment disciplines", " ".join(triathlon["data_gaps"]))
 
+    def test_analysis_sections_separate_observation_and_interpretation(self) -> None:
+        result = self.service.analyze_session(self.running.record_id)
+        sections = result["analysis_sections"]
+        self.assertEqual(sections["external_output"]["metrics"]["pace_min_per_km"], 5.0)
+        self.assertEqual(sections["internal_response"]["status"], "insufficient")
+        self.assertEqual(sections["training_intent"]["status"], "not_recorded")
+        self.assertEqual(sections["within_session_pattern"]["status"], "insufficient")
+        self.assertEqual(sections["history_reference"]["status"], "insufficient")
+        self.assertEqual(sections["evidence_quality"]["detail_status"], "summary_only")
+        self.assertNotIn("training effect", str(sections["external_output"]))
+
+    def test_recorded_and_calculated_speed_difference_is_flagged_as_time_basis(self) -> None:
+        record = CanonicalRecord.create(
+            athlete_id="a", kind="activity",
+            occurred_at=datetime(2026, 10, 26, tzinfo=UTC),
+            data={"sport": "running", "duration_min": 50, "distance_m": 10000,
+                  "avg_speed_mps": 4.0},
+        )
+        external = EndurancePerformanceService(
+            "a", MemoryRecords([record])
+        ).analyze_session(record.record_id)["analysis_sections"]["external_output"]
+        self.assertEqual(external["speed_cross_check"]["status"], "different")
+        self.assertIn("time bases", external["speed_cross_check"]["interpretation"])
+
     def test_athlete_ownership_and_insufficient_baseline(self) -> None:
         with self.assertRaisesRegex(ValueError, "current activity record not found"):
             self.service.analyze_session(self.foreign.record_id)
@@ -117,6 +141,30 @@ class EndurancePerformanceTests(unittest.TestCase):
         self.assertNotIn(future.record_id, result["evidence_ids"])
         self.assertIn("not controlled", " ".join(result["limitations"]))
 
+    def test_similar_sessions_exclude_other_sources_and_session_types(self) -> None:
+        when = datetime(2026, 10, 26, tzinfo=UTC)
+
+        def logged(offset: int, source: str, session_type: str | None):
+            data = {"sport": "running", "duration_min": 50, "distance_m": 10000}
+            if session_type is not None:
+                data["session_type"] = session_type
+            return CanonicalRecord.create(
+                athlete_id="a", kind="activity", occurred_at=when - timedelta(days=offset),
+                data=data,
+                evidence=(EvidenceRef(source, f"{source}-{offset}", when),),
+            )
+
+        current = logged(0, "garmin-cn", "aerobic")
+        same_source = [logged(day, "garmin-cn", "aerobic") for day in (7, 14, 21)]
+        wrong_source = logged(4, "file-import", "aerobic")
+        wrong_type = logged(5, "garmin-cn", "interval")
+        result = EndurancePerformanceService(
+            "a", MemoryRecords([current, *same_source, wrong_source, wrong_type]),
+        ).analyze_session(current.record_id)["similar_sessions"]
+        self.assertEqual(result["sample_count"], 3)
+        self.assertNotIn(wrong_source.record_id, result["evidence_ids"])
+        self.assertNotIn(wrong_type.record_id, result["evidence_ids"])
+
     def test_lap_pacing_pattern_requires_comparable_complete_laps(self) -> None:
         record = CanonicalRecord.create(
             athlete_id="a", kind="activity",
@@ -136,6 +184,28 @@ class EndurancePerformanceTests(unittest.TestCase):
         self.assertEqual(pattern["first_half_median"], 5)
         self.assertEqual(pattern["second_half_median"], 6)
         self.assertEqual(pattern["difference_percent"], 20)
+        self.assertEqual(pattern["direction"], "second_half_metric_higher")
+
+        with_hr = CanonicalRecord.create(
+            athlete_id="a", kind="activity",
+            occurred_at=datetime(2026, 10, 26, tzinfo=UTC),
+            data={
+                "sport": "running", "duration_min": 22, "distance_m": 4000,
+                "laps": [
+                    {"distance_m": 1000, "duration_min": duration, "avg_hr": hr}
+                    for duration, hr in ((5, 140), (5, 142), (6, 150), (6, 152))
+                ],
+            },
+        )
+        paired = EndurancePerformanceService(
+            "a", MemoryRecords([with_hr])
+        ).analyze_session(with_hr.record_id)["analysis_sections"]["within_session_pattern"]
+        self.assertEqual(paired["paired_lap_observations"]["avg_hr"], {
+            "first_half_median": 141.0,
+            "second_half_median": 151.0,
+            "difference": 10.0,
+        })
+        self.assertIn("not prove fatigue", paired["limitation"])
 
         uneven = CanonicalRecord.create(
             athlete_id="a", kind="activity",
@@ -177,8 +247,27 @@ class EndurancePerformanceTests(unittest.TestCase):
             "plan-1", "session-1", self.running.record_id
         )
         self.assertEqual(result["duration_delta_min"], 10)
+        self.assertIsNone(result["distance_delta_m"])
         self.assertTrue(result["same_sport"])
         self.assertNotIn("completed", result)
+
+    def test_distance_only_plan_comparison_does_not_invent_time_target(self) -> None:
+        plan = CanonicalRecord.create(
+            athlete_id="a", kind="training-plan",
+            occurred_at=datetime(2026, 10, 20, tzinfo=UTC),
+            data={"plan_id": "distance-plan", "sessions": [{
+                "session_id": "distance-session", "session_date": "2026-10-26",
+                "sport": "running", "duration_min": None, "distance_m": 12000,
+            }]},
+        )
+        self.service.records.records.append(plan)
+        result = self.service.compare_plan_actual(
+            "distance-plan", "distance-session", self.running.record_id
+        )
+        self.assertIsNone(result["duration_delta_min"])
+        self.assertEqual(result["distance_delta_m"], -2000)
+        self.assertEqual(result["planned"]["distance_m"], 12000)
+        self.assertEqual(result["actual"]["distance_m"], 10000)
 
 
 if __name__ == "__main__":
